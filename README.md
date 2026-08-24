@@ -1,4 +1,4 @@
-# ayh-h3 — 爱优护轻便侠 218 电动轮椅 H3 视频生成（主图视频 + 推广视频）
+# ayh-wd — 爱优护轻便侠 218 电动轮椅 H3 视频生成（主图视频 + 推广视频）
 
 基于 AutoDL.Art MiniMax H3 视频生成 API，为「爱优护 Ainsnbot 轻便侠 218 电动轮椅」生成电商主图视频与推广视频。独立于仓库的 `autodl` 技能（那个是佳康顺折叠轮椅软广），本技能产品、提示词模板、参考图全部独立。
 
@@ -11,7 +11,7 @@
 ## 快速开始
 
 ```bash
-cd "C:/Users/20200/AppData/Local/hermes/skills/ayh-h3/scripts"
+cd "C:/Users/20200/AppData/Local/hermes/skills/ayh-wd/scripts"
 python h3_gen.py -w multi_image --prompt "提示词" \
   -i "D:/BaiduSyncdisk/10 产品高清图/爱优护详情页/轻便侠 218/正侧-3-无阴影.png" \
   -i "D:/BaiduSyncdisk/10 产品高清图/爱优护详情页/轻便侠 218/折叠-无阴影.png" \
