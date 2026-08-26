@@ -1,0 +1,42 @@
+{
+  "profile_id": "ayh-electric-wheelchair-guanghe-v1",
+  "product_name": "爱优护电动轮椅",
+  "category": "电动轮椅",
+  "platform": "淘宝/天猫光合视频",
+  "duration_seconds": 15,
+  "ratio": "9:16",
+  "default_resolution": "768P",
+  "optional_resolutions": ["768P", "2K"],
+  "required_title_term": "电动轮椅",
+  "publish_title_count": 1,
+  "publish_title_target_chars": 20,
+  "publish_title_style": "标题党但语义顺畅且不夸张",
+  "cover_title_min_chars": 4,
+  "cover_title_max_chars": 6,
+  "closing_product_name": "爱优护电动轮椅",
+  "body_min_chars": 80,
+  "body_max_chars": 150,
+  "fixed_hashtags": [
+    "#爱优护电动轮椅",
+    "#ainsnbot高端智能电动轮椅",
+    "#电动轮椅",
+    "#老人专用电动轮椅"
+  ],
+  "video_model": "AutoDL.Art MiniMax-H3",
+  "aigc_watermark": false,
+  "background_music": false,
+  "image_similarity_threshold": 0.9,
+  "image_max_attempts": 3,
+  "video_max_reruns": 1,
+  "concurrency": 3,
+  "poll_interval_seconds": 20,
+  "poll_timeout_seconds": 3600,
+  "forbidden_claims": [
+    "全网第一",
+    "最强",
+    "绝对安全",
+    "永久耐用",
+    "治疗",
+    "康复"
+  ]
+}

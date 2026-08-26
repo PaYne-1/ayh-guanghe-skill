@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+data/产品卖点库/*.json
+data/候选经验/*.json
+data/正式经验/*.json
+data/模型能力边界/*.json
+封面图参考/*
+!封面图参考/.gitkeep

@@ -1,0 +1,6 @@
+interface:
+  display_name: "产品短视频流水线"
+  short_description: "批量策划、生成并验收15秒产品短视频"
+  default_prompt: "Use $product-video-pipeline to create a confirmed product-video batch from my product folder and selling points."
+policy:
+  allow_implicit_invocation: true
