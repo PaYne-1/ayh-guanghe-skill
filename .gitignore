@@ -4,4 +4,3 @@ scripts/.env
 *.bak
 __pycache__/
 *.pyc
-.worktrees/
