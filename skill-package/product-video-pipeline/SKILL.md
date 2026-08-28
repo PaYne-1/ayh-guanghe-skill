@@ -37,6 +37,7 @@ python scripts/workflow_cli.py init `
 
 - 每条项目只生成一个发布标题、一个封面标题、一套脚本、一张最终分镜图、一张封面图和一个视频。
 - 单条任务目录第一级只保留 `视频.mp4`、`封面图.png`、`发布正文.md`、`标题.txt`、`分镜图.png` 五项最终产出和 `_工作文件`；所有状态、提示词、音轨、验收证据、实验文件及历史版本必须写入 `_工作文件` 的对应分类，禁止散落在第一级。
+- 五项最终产出分别需要用户明确通过，并在 `_工作文件/验收记录/产出验收记录.json` 中绑定候选路径和 SHA-256；自动检查通过、技术指标通过或等待人工验收都不能晋升一级产出。没有明确通过时，一级目录不保留对应文件。
 - 所有分镜图默认生成竖屏 4K：`2160×3840`、`9:16`。这是分镜图固定默认值；视频仍按启动确认单选择 `768P` 或 `2K`，两者不得混用。
 - 分镜图最多三次；第三次仍不合格时只暂停该项目，其他项目继续。
 - 视频为 V01 初次生成，人工不通过后只允许 V02 重跑一次。
@@ -52,6 +53,8 @@ python scripts/workflow_cli.py init `
 |---|---|
 | 内容落盘 | `workflow_cli.py validate-content` |
 | 封面文字 | `render_cover.py --title-file _工作文件/生成过程/封面标题.txt`，由程序绘制中文 |
+| 明确验收产出 | `workflow_cli.py review-output`，`passed` 后才晋升一级目录 |
+| 审计一级产出 | `workflow_cli.py audit-outputs`，撤下无有效通过证据的文件 |
 | 付费前检查 | `autodl_h3.py submit --dry-run` |
 | 正式提交 | 加 `--confirm-paid YES` |
 | 批量验收 | `workflow_cli.py build-review` |

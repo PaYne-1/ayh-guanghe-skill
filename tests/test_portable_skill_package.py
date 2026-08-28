@@ -81,7 +81,25 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件/验收记录/自动验收报告.md" in review
     assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
     assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.3.0"
+
+
+def test_explicit_approval_rules_gate_every_root_output_by_hash():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    contract = (SKILL_ROOT / "references" / "content-contract.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
+    combined = "\n".join((skill, workflow, contract, review))
+
+    assert "产出验收记录.json" in combined
+    assert "明确通过" in skill
+    assert "SHA-256" in workflow
+    assert "没有明确通过" in workflow and "一级目录不保留" in workflow
+    assert "review-output" in skill and "audit-outputs" in skill
+    assert "自动验收" in review and "不能" in review and "最终晋升" in review
+    assert "_工作文件/生成过程/标题.txt" in contract
+    assert "_工作文件/生成过程/发布正文.md" in contract
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.3.0"
 
 
 def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp_path):

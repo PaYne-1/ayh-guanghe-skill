@@ -79,7 +79,7 @@ python scripts/autodl_h3.py submit `
 
 ```powershell
 python scripts/autodl_h3.py poll --task-id "task_id" --interval 20 --max-wait 3600 --state "_工作文件/任务状态/查询结果.json"
-python scripts/autodl_h3.py download --url "结果URL" --output "视频.mp4"
+python scripts/autodl_h3.py download --url "结果URL" --output "_工作文件/生成过程/视频候选.mp4"
 ```
 
 正式提交后立即把任务标识保存到 `_工作文件/任务状态/任务信息.json`。提交请求、提交预览、查询日志、查询结果和 AutoDL 原始响应也全部进入 `_工作文件/任务状态`，不得写在单条任务第一级。
