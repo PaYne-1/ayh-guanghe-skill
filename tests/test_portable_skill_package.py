@@ -244,6 +244,67 @@ def test_real_world_audio_review_names_are_classified_as_review_evidence(tmp_pat
     assert relative.name == candidate.name
 
 
+def test_artifact_decision_validates_name_decision_user_and_source_boundary(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"candidate")
+    outside = tmp_path / "外部视频.mp4"
+    outside.write_bytes(b"outside")
+    root_output = item / "视频.mp4"
+    root_output.write_bytes(b"root")
+
+    with pytest.raises(ValueError, match="产出名称"):
+        runtime.record_artifact_decision(item, "实验.mp4", candidate, "passed", "用户", "确认通过")
+    with pytest.raises(ValueError, match="验收决定"):
+        runtime.record_artifact_decision(item, "视频.mp4", candidate, "pending", "用户", "等待")
+    with pytest.raises(ValueError, match="确认人"):
+        runtime.record_artifact_decision(item, "视频.mp4", candidate, "passed", "", "确认通过")
+    with pytest.raises(ValueError, match="反馈"):
+        runtime.record_artifact_decision(item, "视频.mp4", candidate, "passed", "用户", "")
+    with pytest.raises(ValueError, match="任务目录内"):
+        runtime.record_artifact_decision(item, "视频.mp4", outside, "passed", "用户", "确认通过")
+    with pytest.raises(ValueError, match="不能是一级固定产出"):
+        runtime.record_artifact_decision(item, "视频.mp4", root_output, "passed", "用户", "确认通过")
+
+
+def test_approval_events_are_append_only_and_latest_event_wins(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选封面.png"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"cover")
+
+    passed = runtime.record_artifact_decision(
+        item,
+        "封面图.png",
+        candidate,
+        "passed",
+        "用户",
+        "封面确认通过",
+        now=datetime.fromisoformat("2026-08-28T12:00:00+08:00"),
+    )
+    revoked = runtime.record_artifact_decision(
+        item,
+        "封面图.png",
+        candidate,
+        "revoked",
+        "用户",
+        "发现产品结构问题，撤销",
+        now=datetime.fromisoformat("2026-08-28T12:05:00+08:00"),
+    )
+
+    events = runtime.load_approval_events(item)
+    latest = runtime.latest_artifact_decision(events, "封面图.png", passed["sha256"])
+    assert len(events) == 2
+    assert passed["event_id"] != revoked["event_id"]
+    assert latest["event_id"] == revoked["event_id"]
+    assert latest["decision"] == "revoked"
+    assert passed["source_path"] == "_工作文件/生成过程/候选封面.png"
+    assert runtime.approval_log_path(item).exists()
+
+
 def test_content_validator_enforces_confirmed_ayh_contract():
     runtime = load_script("workflow_cli.py")
     profile = json.loads(

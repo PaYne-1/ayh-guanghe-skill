@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -79,6 +80,8 @@ REVIEW_PREFIXES = (
 )
 HISTORY_DIR_NAMES = {"失败版本", "视频版本"}
 ITEM_DIR_PATTERN = re.compile(r"^V\d{3}_")
+APPROVAL_LOG_NAME = "产出验收记录.json"
+APPROVAL_DECISIONS = {"passed", "failed", "revoked"}
 
 
 class BatchItem:
@@ -129,6 +132,90 @@ def work_path(item_dir: Path, category: str, filename: str) -> Path:
 def read_compatible_path(item_dir: Path, category: str, filename: str) -> Path:
     preferred = work_path(item_dir, category, filename)
     return preferred if preferred.exists() else item_dir / filename
+
+
+def approval_log_path(item_dir: Path) -> Path:
+    return work_path(item_dir, "验收记录", APPROVAL_LOG_NAME)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_approval_events(item_dir: Path) -> List[Dict[str, object]]:
+    payload = read_json(approval_log_path(item_dir), {"events": []})
+    if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+        raise ValueError("产出验收记录格式错误：必须包含 events 数组")
+    if any(not isinstance(event, dict) for event in payload["events"]):
+        raise ValueError("产出验收记录格式错误：events 只能包含对象")
+    return list(payload["events"])
+
+
+def latest_artifact_decision(
+    events: Sequence[Dict[str, object]],
+    artifact_name: str,
+    sha256: str,
+) -> Optional[Dict[str, object]]:
+    matches = [
+        (datetime.fromisoformat(str(event["confirmed_at"])), index, event)
+        for index, event in enumerate(events)
+        if event.get("artifact_name") == artifact_name and event.get("sha256") == sha256
+    ]
+    return max(matches, key=lambda value: (value[0], value[1]))[2] if matches else None
+
+
+def record_artifact_decision(
+    item_dir: Path,
+    artifact_name: str,
+    source_path: Path,
+    decision: str,
+    confirmed_by: str,
+    feedback: str,
+    now: Optional[datetime] = None,
+) -> Dict[str, object]:
+    item_dir = item_dir.resolve()
+    if not item_dir.is_dir() or not ITEM_DIR_PATTERN.match(item_dir.name):
+        raise ValueError(f"不是有效的单条任务目录：{item_dir}")
+    if artifact_name not in DELIVERABLE_NAMES:
+        raise ValueError(f"未知产出名称：{artifact_name}")
+    if decision not in APPROVAL_DECISIONS:
+        raise ValueError(f"验收决定只能是 passed、failed 或 revoked：{decision}")
+    if not confirmed_by.strip():
+        raise ValueError("确认人不能为空")
+    if not feedback.strip():
+        raise ValueError("验收反馈不能为空")
+
+    source_path = source_path.resolve()
+    try:
+        relative_source = source_path.relative_to(item_dir)
+    except ValueError as exc:
+        raise ValueError("候选文件必须位于单条任务目录内") from exc
+    if not source_path.is_file():
+        raise ValueError(f"候选文件不存在或不是普通文件：{source_path}")
+    if source_path.parent == item_dir and source_path.name in DELIVERABLE_NAMES:
+        raise ValueError("候选文件不能是一级固定产出，必须来自 _工作文件")
+
+    confirmed_at = now or datetime.now().astimezone()
+    if confirmed_at.utcoffset() is None:
+        raise ValueError("确认时间必须包含时区")
+    event: Dict[str, object] = {
+        "event_id": str(uuid.uuid4()),
+        "artifact_name": artifact_name,
+        "source_path": relative_source.as_posix(),
+        "sha256": _sha256_file(source_path),
+        "decision": decision,
+        "confirmed_by": confirmed_by.strip(),
+        "confirmed_at": confirmed_at.isoformat(),
+        "feedback": feedback.strip(),
+    }
+    events = load_approval_events(item_dir)
+    events.append(event)
+    atomic_write_json(approval_log_path(item_dir), {"events": events})
+    return event
 
 
 def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
