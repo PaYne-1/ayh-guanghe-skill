@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -322,8 +324,53 @@ def test_approval_events_are_append_only_and_latest_event_wins(tmp_path):
     assert passed["event_id"] != revoked["event_id"]
     assert latest["event_id"] == revoked["event_id"]
     assert latest["decision"] == "revoked"
-    assert passed["source_path"] == "_工作文件/生成过程/候选封面.png"
+    assert passed["submitted_source_path"] == "_工作文件/生成过程/候选封面.png"
+    assert passed["source_path"].startswith("_工作文件/历史版本/验收候选/封面图/")
     assert runtime.approval_log_path(item).exists()
+
+
+def test_latest_artifact_decision_uses_append_order_even_if_clock_moves_backward(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选封面.png"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"cover")
+    passed = runtime.record_artifact_decision(
+        item, "封面图.png", candidate, "passed", "用户", "通过",
+        now=datetime.fromisoformat("2026-08-28T12:00:00+08:00"),
+    )
+    revoked = runtime.record_artifact_decision(
+        item, "封面图.png", candidate, "revoked", "用户", "撤销",
+        now=datetime.fromisoformat("2026-08-28T11:00:00+08:00"),
+    )
+
+    latest = runtime.latest_artifact_decision(runtime.load_approval_events(item), "封面图.png", passed["sha256"])
+
+    assert latest["event_id"] == revoked["event_id"]
+
+
+def test_concurrent_artifact_decisions_do_not_lose_events(tmp_path, monkeypatch):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"video")
+    original_write = runtime.atomic_write_json
+
+    def slow_write(path, value):
+        time.sleep(0.02)
+        original_write(path, value)
+
+    monkeypatch.setattr(runtime, "atomic_write_json", slow_write)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(runtime.record_artifact_decision, item, "视频.mp4", candidate, "passed", f"用户{i}", "明确通过")
+            for i in range(8)
+        ]
+        for future in futures:
+            future.result()
+
+    assert len(runtime.load_approval_events(item)) == 8
 
 
 def test_promote_approved_artifact_archives_previous_root_and_keeps_candidate(tmp_path):
@@ -353,6 +400,31 @@ def test_promote_approved_artifact_archives_previous_root_and_keeps_candidate(tm
     assert len(archived) == 1
     assert archived[0].read_bytes() == b"old-title"
     assert runtime._sha256_file(old_root) == event["sha256"]
+
+
+def test_promote_rolls_back_previous_root_when_final_replace_fails(tmp_path, monkeypatch):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "最终候选标题.txt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"approved-title")
+    root_output = item / "标题.txt"
+    root_output.write_bytes(b"old-title")
+    event = runtime.record_artifact_decision(item, "标题.txt", candidate, "passed", "用户", "明确通过")
+    original_replace = runtime.Path.replace
+
+    def failing_replace(path, target):
+        if path.name.startswith("标题.txt.tmp") and Path(target) == root_output:
+            raise OSError("injected replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(runtime.Path, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="injected replace failure"):
+        runtime.promote_approved_artifact(item, event)
+
+    assert root_output.read_bytes() == b"old-title"
+    assert not list(item.glob("标题.txt.tmp*"))
 
 
 @pytest.mark.parametrize("decision", [None, "failed", "revoked"])
@@ -473,6 +545,17 @@ def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
     assert root_output.exists()
 
 
+def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    (item / "视频.mp4").mkdir(parents=True)
+
+    exit_code = runtime.main(["audit-outputs", "--item-dir", str(item)])
+
+    assert exit_code == 2
+    assert (item / "视频.mp4").is_dir()
+
+
 def test_content_validator_enforces_confirmed_ayh_contract():
     runtime = load_script("workflow_cli.py")
     profile = json.loads(
@@ -548,6 +631,20 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
     assert (item / "_工作文件" / "生成过程" / "分镜提示词.txt").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
     assert not (item / "策划内容.json").exists()
+
+    title_candidate = item / "_工作文件" / "生成过程" / "标题.txt"
+    old_title = title_candidate.read_bytes()
+    event = runtime.record_artifact_decision(item, "标题.txt", title_candidate, "passed", "用户", "旧标题明确通过")
+    package["publish_title"] = "爱优护电动轮椅让爸妈日常操作更省心吗"
+    package_path.write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+
+    runtime.save_content_package(item, package_path, profile)
+    runtime.promote_approved_artifact(item, event)
+
+    assert title_candidate.read_bytes() != old_title
+    assert (item / "标题.txt").read_bytes() == old_title
+    archived_candidates = list((item / "_工作文件" / "历史版本" / "候选版本").rglob("*.txt"))
+    assert any(path.read_bytes() == old_title for path in archived_candidates)
 
 
 def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tmp_path):
@@ -774,7 +871,7 @@ def test_review_report_contains_one_card_per_video(tmp_path):
     assert "完成验收" in html
 
 
-def test_review_report_ignores_unapproved_root_video_until_hash_approved(tmp_path):
+def test_review_report_shows_candidate_video_without_treating_unapproved_root_as_valid(tmp_path):
     runtime = load_script("workflow_cli.py")
     batch = tmp_path / "20260828_批次001"
     item = batch / "V001_卖点_待生成"
@@ -784,7 +881,11 @@ def test_review_report_ignores_unapproved_root_video_until_hash_approved(tmp_pat
     (item / "视频.mp4").write_bytes(b"unapproved-video")
 
     unapproved_html = runtime.build_review_report(batch).read_text(encoding="utf-8")
-    assert "<video controls" not in unapproved_html
+    assert "<video controls" in unapproved_html
+    assert "待明确验收" in unapproved_html
+    assert runtime._sha256_file(candidate) in unapproved_html
+    assert "_工作文件/生成过程/候选视频.mp4" in unapproved_html
+    assert "unapproved-video" not in unapproved_html
 
     event = runtime.record_artifact_decision(item, "视频.mp4", candidate, "passed", "用户", "视频明确通过")
     runtime.promote_approved_artifact(item, event)

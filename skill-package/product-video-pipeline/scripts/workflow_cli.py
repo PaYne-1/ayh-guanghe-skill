@@ -8,12 +8,15 @@ content, records task IDs, and builds an offline human-review report.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -82,6 +85,8 @@ HISTORY_DIR_NAMES = {"失败版本", "视频版本"}
 ITEM_DIR_PATTERN = re.compile(r"^V\d{3}_")
 APPROVAL_LOG_NAME = "产出验收记录.json"
 APPROVAL_DECISIONS = {"passed", "failed", "revoked"}
+_APPROVAL_THREAD_LOCKS: Dict[str, threading.Lock] = {}
+_APPROVAL_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 class BatchItem:
@@ -107,6 +112,38 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_json(path: Path, value: object) -> None:
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2))
+
+
+@contextlib.contextmanager
+def _approval_log_lock(item_dir: Path):
+    lock_path = approval_log_path(item_dir).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(lock_path.resolve()).casefold()
+    with _APPROVAL_THREAD_LOCKS_GUARD:
+        thread_lock = _APPROVAL_THREAD_LOCKS.setdefault(key, threading.Lock())
+    with thread_lock:
+        with lock_path.open("a+b") as stream:
+            if stream.seek(0, os.SEEK_END) == 0:
+                stream.write(b"0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def read_json(path: Path, default: Optional[object] = None):
@@ -160,12 +197,44 @@ def latest_artifact_decision(
     artifact_name: str,
     sha256: str,
 ) -> Optional[Dict[str, object]]:
-    matches = [
-        (datetime.fromisoformat(str(event["confirmed_at"])), index, event)
-        for index, event in enumerate(events)
-        if event.get("artifact_name") == artifact_name and event.get("sha256") == sha256
-    ]
-    return max(matches, key=lambda value: (value[0], value[1]))[2] if matches else None
+    return next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("artifact_name") == artifact_name and event.get("sha256") == sha256
+        ),
+        None,
+    )
+
+
+def _snapshot_review_candidate(
+    item_dir: Path,
+    artifact_name: str,
+    source_path: Path,
+    digest: str,
+    confirmed_at: datetime,
+) -> Path:
+    artifact = Path(artifact_name)
+    snapshot_dir = work_path(item_dir, "历史版本", "验收候选") / artifact.stem
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = confirmed_at.strftime("%Y%m%dT%H%M%S%f%z")
+    snapshot = snapshot_dir / f"{timestamp}_{digest[:12]}{artifact.suffix}"
+    counter = 2
+    while snapshot.exists():
+        if snapshot.is_file() and _sha256_file(snapshot) == digest:
+            return snapshot
+        snapshot = snapshot_dir / f"{timestamp}_{digest[:12]}_{counter}{artifact.suffix}"
+        counter += 1
+    temporary = snapshot.with_suffix(snapshot.suffix + f".tmp.{uuid.uuid4().hex}")
+    try:
+        shutil.copyfile(source_path, temporary)
+        if _sha256_file(temporary) != digest:
+            raise OSError(f"验收候选快照哈希校验失败：{source_path}")
+        temporary.replace(snapshot)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return snapshot
 
 
 def record_artifact_decision(
@@ -203,19 +272,23 @@ def record_artifact_decision(
     confirmed_at = now or datetime.now().astimezone()
     if confirmed_at.utcoffset() is None:
         raise ValueError("确认时间必须包含时区")
+    digest = _sha256_file(source_path)
+    snapshot = _snapshot_review_candidate(item_dir, artifact_name, source_path, digest, confirmed_at)
     event: Dict[str, object] = {
         "event_id": str(uuid.uuid4()),
         "artifact_name": artifact_name,
-        "source_path": relative_source.as_posix(),
-        "sha256": _sha256_file(source_path),
+        "source_path": snapshot.relative_to(item_dir).as_posix(),
+        "submitted_source_path": relative_source.as_posix(),
+        "sha256": digest,
         "decision": decision,
         "confirmed_by": confirmed_by.strip(),
         "confirmed_at": confirmed_at.isoformat(),
         "feedback": feedback.strip(),
     }
-    events = load_approval_events(item_dir)
-    events.append(event)
-    atomic_write_json(approval_log_path(item_dir), {"events": events})
+    with _approval_log_lock(item_dir):
+        events = load_approval_events(item_dir)
+        events.append(event)
+        atomic_write_json(approval_log_path(item_dir), {"events": events})
     return event
 
 
@@ -282,14 +355,44 @@ def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
             raise ValueError(f"一级固定产出路径不是文件：{root_artifact}")
         if _sha256_file(root_artifact) == digest:
             return root_artifact
-        confirmed_at = datetime.fromisoformat(str(recorded["confirmed_at"]))
-        _archive_root_artifact(item_dir, root_artifact, "已撤换产出", confirmed_at)
-
-    temporary = root_artifact.with_suffix(root_artifact.suffix + ".tmp")
-    shutil.copyfile(source, temporary)
-    temporary.replace(root_artifact)
-    if _sha256_file(root_artifact) != digest:
-        raise OSError(f"晋升后哈希校验失败：{root_artifact}")
+    confirmed_at = datetime.fromisoformat(str(recorded["confirmed_at"]))
+    temporary = root_artifact.with_name(root_artifact.name + f".tmp.{uuid.uuid4().hex}")
+    archived_previous: Optional[Path] = None
+    try:
+        shutil.copyfile(source, temporary)
+        if _sha256_file(temporary) != digest:
+            raise OSError(f"晋升临时文件哈希校验失败：{source}")
+        if root_artifact.exists():
+            old_digest = _sha256_file(root_artifact)
+            archived_previous = _unique_artifact_archive_path(
+                item_dir, "已撤换产出", artifact_name, old_digest, confirmed_at
+            )
+            archived_previous.parent.mkdir(parents=True, exist_ok=True)
+            root_artifact.replace(archived_previous)
+        try:
+            temporary.replace(root_artifact)
+            if _sha256_file(root_artifact) != digest:
+                raise OSError(f"晋升后哈希校验失败：{root_artifact}")
+        except Exception as promote_error:
+            rollback_error = None
+            try:
+                if root_artifact.exists() and root_artifact.is_file():
+                    failed_digest = _sha256_file(root_artifact)
+                    failed_target = _unique_artifact_archive_path(
+                        item_dir, "晋升失败", artifact_name, failed_digest, confirmed_at
+                    )
+                    failed_target.parent.mkdir(parents=True, exist_ok=True)
+                    root_artifact.replace(failed_target)
+                if archived_previous is not None and archived_previous.exists():
+                    archived_previous.replace(root_artifact)
+            except Exception as exc:
+                rollback_error = exc
+            if rollback_error is not None:
+                raise OSError(f"晋升失败且旧产出回滚失败：{rollback_error}") from promote_error
+            raise
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return root_artifact
 
 
@@ -374,6 +477,15 @@ def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, obj
         "dry_run": dry_run,
         "items": [audit_promoted_outputs(item_dir, dry_run=dry_run) for item_dir in item_dirs],
     }
+
+
+def _audit_result_has_errors(result: Dict[str, object]) -> bool:
+    if result.get("errors"):
+        return True
+    items = result.get("items", [])
+    return isinstance(items, list) and any(
+        isinstance(item, dict) and _audit_result_has_errors(item) for item in items
+    )
 
 
 def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
@@ -796,6 +908,31 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
     return list(dict.fromkeys(issues))
 
 
+def _write_candidate_preserving_previous(item_dir: Path, filename: str, text: str, now: datetime) -> None:
+    target = work_path(item_dir, "生成过程", filename)
+    encoded = text.encode("utf-8")
+    new_digest = hashlib.sha256(encoded).hexdigest()
+    if target.exists():
+        if not target.is_file():
+            raise ValueError(f"候选路径不是普通文件：{target}")
+        old_digest = _sha256_file(target)
+        if old_digest == new_digest:
+            return
+        archive = _unique_artifact_archive_path(item_dir, "候选版本", filename, old_digest, now)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        target.replace(archive)
+    temporary = target.with_name(target.name + f".tmp.{uuid.uuid4().hex}")
+    try:
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(encoded)
+        temporary.replace(target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    if _sha256_file(target) != new_digest:
+        raise OSError(f"候选文件写入后哈希校验失败：{target}")
+
+
 def save_content_package(item_dir: Path, package_path: Path, profile_path: Path) -> None:
     package = read_json(package_path)
     profile = read_json(profile_path)
@@ -803,15 +940,23 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     if issues:
         raise ValueError("内容校验失败：" + ", ".join(issues))
     ensure_work_dirs(item_dir)
-    atomic_write_json(work_path(item_dir, "生成过程", "策划内容.json"), package)
-    atomic_write_text(
-        work_path(item_dir, "生成过程", "标题.txt"),
-        f"发布标题：{package['publish_title']}\n封面标题：{package['cover_title']}\n",
+    now = datetime.now().astimezone()
+    _write_candidate_preserving_previous(
+        item_dir,
+        "策划内容.json",
+        json.dumps(package, ensure_ascii=False, indent=2),
+        now,
     )
-    atomic_write_text(work_path(item_dir, "生成过程", "分镜提示词.txt"), str(package["storyboard_prompt"]))
-    atomic_write_text(work_path(item_dir, "生成过程", "视频提示词.txt"), str(package["video_prompt"]))
+    _write_candidate_preserving_previous(
+        item_dir,
+        "标题.txt",
+        f"发布标题：{package['publish_title']}\n封面标题：{package['cover_title']}\n",
+        now,
+    )
+    _write_candidate_preserving_previous(item_dir, "分镜提示词.txt", str(package["storyboard_prompt"]), now)
+    _write_candidate_preserving_previous(item_dir, "视频提示词.txt", str(package["video_prompt"]), now)
     tags = " ".join(package["hashtags"])
-    atomic_write_text(work_path(item_dir, "生成过程", "发布正文.md"), f"{package['publish_body']}\n\n{tags}\n")
+    _write_candidate_preserving_previous(item_dir, "发布正文.md", f"{package['publish_body']}\n\n{tags}\n", now)
 
 
 def _find_item(batch_dir: Path, video_id: str) -> Path:
@@ -861,24 +1006,60 @@ def _safe_file_url(item_dir: Path, filename: str) -> str:
     return quote(f"{item_dir.name}/{filename}") if path is not None else ""
 
 
+def _review_candidate_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
+    names = {
+        "标题.txt": ("标题.txt",),
+        "封面图.png": ("封面候选.png", "候选封面.png", "封面图.png"),
+        "视频.mp4": ("视频候选.mp4", "候选视频.mp4"),
+    }.get(artifact_name, ())
+    process_dir = work_path(item_dir, "生成过程", "placeholder").parent
+    for name in names:
+        path = process_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _review_media(batch_dir: Path, item_dir: Path, artifact_name: str) -> Dict[str, str]:
+    path = validated_promoted_artifact_path(item_dir, artifact_name)
+    status = "已明确通过"
+    if path is None:
+        path = _review_candidate_path(item_dir, artifact_name)
+        status = "待明确验收"
+    if path is None:
+        return {"url": "", "status": "尚无候选", "source_path": "", "sha256": ""}
+    relative_item = path.relative_to(item_dir).as_posix()
+    relative_batch = path.relative_to(batch_dir).as_posix()
+    return {
+        "url": quote(relative_batch),
+        "status": status,
+        "source_path": relative_item,
+        "sha256": _sha256_file(path),
+    }
+
+
 def build_review_report(batch_dir: Path) -> Path:
     batch_dir = batch_dir.resolve()
     cards = []
     for item_dir in sorted(path for path in batch_dir.iterdir() if path.is_dir() and re.match(r"V\d{3}_", path.name)):
         video_id = item_dir.name.split("_", 1)[0]
-        title_path = validated_promoted_artifact_path(item_dir, "标题.txt")
-        title = title_path.read_text(encoding="utf-8") if title_path is not None else "标题尚未明确验收通过"
+        title_path = validated_promoted_artifact_path(item_dir, "标题.txt") or _review_candidate_path(item_dir, "标题.txt")
+        title = title_path.read_text(encoding="utf-8") if title_path is not None else "标题尚无候选"
         task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
         auto_qa_path = read_compatible_path(item_dir, "验收记录", "自动验收报告.md")
         auto_qa = auto_qa_path.read_text(encoding="utf-8") if auto_qa_path.exists() else "尚无自动验收报告"
-        video_url = _safe_file_url(item_dir, "视频.mp4")
-        cover_url = _safe_file_url(item_dir, "封面图.png")
-        video_tag = f'<video controls preload="metadata" src="{video_url}"></video>' if video_url else '<p class="missing">视频尚未下载</p>'
-        cover_tag = f'<img src="{cover_url}" alt="{video_id} 封面">' if cover_url else ""
+        video = _review_media(batch_dir, item_dir, "视频.mp4")
+        cover = _review_media(batch_dir, item_dir, "封面图.png")
+        video_tag = f'<video controls preload="metadata" src="{video["url"]}"></video>' if video["url"] else '<p class="missing">视频尚未下载</p>'
+        cover_tag = f'<img src="{cover["url"]}" alt="{video_id} 封面">' if cover["url"] else ""
+        video_evidence = html.escape(
+            f'视频：{video["status"]}；候选：{video["source_path"] or "无"}；SHA-256：{video["sha256"] or "无"}'
+        )
         cards.append(
-            f'''<section class="video-card" data-video-id="{html.escape(video_id)}">
+            f'''<section class="video-card" data-video-id="{html.escape(video_id)}" data-video-source="{html.escape(video["source_path"])}" data-video-sha256="{html.escape(video["sha256"])}">
   <h2>{html.escape(video_id)}</h2>
   <div class="media">{video_tag}{cover_tag}</div>
+  <p>{video_evidence}</p>
   <pre>{html.escape(title)}</pre>
   <p>task_id：{html.escape(str(task.get("task_id") or "未提交"))}</p>
   <details><summary>自动验收摘要</summary><pre>{html.escape(auto_qa)}</pre></details>
@@ -905,7 +1086,7 @@ document.getElementById('complete').addEventListener('click',()=>{{
     const reason=card.querySelector('.reason').value.trim();
     if(!choice) error='每个视频都必须选择通过或不通过';
     if(choice && choice.value==='failed' && !reason) error='不通过的视频必须填写原因';
-    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim()}});
+    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim(),artifacts:{{'视频.mp4':{{source_path:card.dataset.videoSource,sha256:card.dataset.videoSha256}}}}}});
   }});
   if(error){{document.getElementById('error').textContent=error;return;}}
   const blob=new Blob([JSON.stringify({{completed_at:new Date().toISOString(),items}},null,2)],{{type:'application/json'}});
@@ -1082,6 +1263,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else audit_batch_outputs(args.batch, dry_run=args.dry_run)
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            if _audit_result_has_errors(result):
+                return 2
         return 0
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)

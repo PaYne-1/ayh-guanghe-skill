@@ -27,7 +27,7 @@ _工作文件/生成过程/语音转写.txt
 python scripts/workflow_cli.py build-review --batch "产品文件夹/生成视频/批次目录"
 ```
 
-打开 `批次验收报告.html`。每条卡片选择“通过”或“不通过”；不通过必须写原因，可以写修改建议。点击“完成验收”下载 `批次验收结果.json`，再回写：
+打开 `批次验收报告.html`。报告会显示待验收视频候选的相对路径和 SHA-256；这只是预览证据，不代表已经晋升。每条卡片选择“通过”或“不通过”；不通过必须写原因，可以写修改建议。点击“完成验收”下载 `批次验收结果.json`，再回写：
 
 ```powershell
 python scripts/workflow_cli.py record-review `
