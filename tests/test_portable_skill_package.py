@@ -141,14 +141,197 @@ def test_content_validator_enforces_confirmed_ayh_contract():
 def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tmp_path):
     client = load_script("autodl_h3.py")
     payload_path = tmp_path / "payload.json"
-    payload_path.write_text(json.dumps({"prompt": "固定镜头"}, ensure_ascii=False), encoding="utf-8")
+    payload_path.write_text(
+        json.dumps(
+            {
+                "prompt": "固定镜头",
+                "duration": 15,
+                "resolution": "768p竖",
+                "ref_image_0": "data:image/png;base64,AAAA",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     preview = client.submit_payload(payload_path, api_key="secret", dry_run=True)
     assert preview["dry_run"] is True
-    assert preview["url"] == "https://www.autodl.art/api/v1/minimax/v2/video_generation"
-    assert preview["payload"]["aigc_watermark"] is False
+    assert preview["url"] == (
+        "https://www.autodl.art/api/v1/comfyui/comfyui_workflow/"
+        "minimax_h3_lightx2v_v5_15s"
+    )
+    assert preview["payload"]["duration"] == 15
+    assert preview["payload"]["resolution"] == "768p竖"
+    assert preview["payload"]["ref_image_0"].startswith("data:image/png;base64,")
+    assert "aigc_watermark" not in preview["payload"]
     assert "secret" not in json.dumps(preview, ensure_ascii=False)
     assert client.extract_task_id({"task_id": "root-task"}) == "root-task"
     assert client.extract_task_id({"data": {"task_id": "nested-task"}}) == "nested-task"
+    assert client._status({"data": {"status": "completed"}}) == "completed"
+
+
+def test_autodl_client_can_preview_first_last_frame_workflow(tmp_path):
+    client = load_script("autodl_h3.py")
+    payload_path = tmp_path / "first-last.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "prompt": "固定镜头，首尾画面一致",
+                "duration": 15,
+                "resolution": "768p竖",
+                "first_frame": "data:image/png;base64,AAAA",
+                "last_frame": "data:image/png;base64,AAAA",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    preview = client.submit_payload(
+        payload_path,
+        api_key="secret",
+        dry_run=True,
+        workflow_id="minimax_h3_lightx2v",
+    )
+
+    assert preview["url"].endswith("/minimax_h3_lightx2v")
+    assert preview["payload"]["first_frame"] == preview["payload"]["last_frame"]
+
+
+def test_autodl_client_can_preview_multi_image_audio_workflow(tmp_path):
+    client = load_script("autodl_h3.py")
+    payload_path = tmp_path / "multi-image-audio.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "prompt": "广角固定构图，轮椅缓慢直线行驶",
+                "duration": 15,
+                "resolution": "768p竖",
+                "ref_image_0": "data:image/png;base64,AAAA",
+                "ref_audio_0": "data:audio/wav;base64,BBBB",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    preview = client.submit_payload(
+        payload_path,
+        api_key="secret",
+        dry_run=True,
+        workflow_id="minimax_h3_image_audio_to_video_v2_15s",
+    )
+
+    assert preview["url"].endswith("/minimax_h3_image_audio_to_video_v2_15s")
+    assert preview["payload"]["ref_audio_0"].startswith("data:audio/wav;base64,")
+
+
+def test_autodl_reference_uses_current_comfyui_workflow():
+    text = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
+    assert "minimax_h3_lightx2v_v5_15s" in text
+    assert "minimax_h3_lightx2v" in text
+    assert "/api/v1/minimax/v2/video_generation" not in text
+    assert "ref_image_0" in text
+    assert "first_frame" in text
+    assert "last_frame" in text
+    assert "minimax_h3_image_audio_to_video_v2_15s" in text
+    assert "ref_audio_0" in text
+
+
+def test_workflow_requires_video_to_match_accepted_storyboard_visuals():
+    text = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    assert "已通过分镜是视频画面的视觉基准" in text
+    assert "人物完整度、产品角度、构图、亮度、曝光、白平衡和色温" in text
+    assert "自动判为视频不合格" in text
+
+
+def test_rules_require_single_shot_smooth_camera_and_complete_narration():
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    contract = (SKILL_ROOT / "references" / "content-contract.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
+    wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
+
+    assert "禁止切镜、跳切、转场" in workflow
+    assert "缓慢、连续、平稳运镜" in workflow
+    assert "最多49个汉字" in contract
+    assert "自动精简" in contract
+    assert "尾句被截断" in review
+    assert "自动判为不合格" in review
+    assert "完整说完全部口播" in wheelchair
+
+
+def test_first_last_frame_workflow_applies_core_rules_for_full_duration():
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
+
+    assert "整个0–15秒" in workflow
+    assert "整个0–15秒" in autodl
+    assert "一镜到底、连续平稳运镜、完整口播" in autodl
+    assert "不得只约束首帧和尾帧" in autodl
+
+
+def test_new_videos_generate_and_validate_audio_before_video():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
+
+    assert "先生成独立口播音轨" in skill
+    assert "音轨生成费用" in startup
+    assert "14秒内" in workflow
+    assert "新视频不得依赖上一版音轨" in autodl
+    assert "minimax_h3_image_audio_to_video_v2_15s" in skill
+
+
+def test_dialogue_scripts_require_distinct_speakers_without_user_listening_gate():
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    contract = (SKILL_ROOT / "references" / "content-contract.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
+    wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
+
+    assert "对话式脚本" in workflow
+    assert "每个不同 `speaker_id` 必须使用可区分的独立人物音色" in workflow
+    assert "系统自动验收，不设置用户试听确认节点" in workflow
+    assert "两个或以上不同的 `speaker_id`" in contract
+    assert "老人自问自答" in review
+    assert "角色身份不得固定为女儿" in wheelchair
+
+
+def test_driving_dialogue_prefers_reasonable_4k_tail_first_last_workflow():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
+
+    assert "行驶双人对话场景" in skill
+    assert "优先使用 `minimax_h3_lightx2v`" in skill
+    assert "2160×3840" in workflow
+    assert "约 1–1.5 米" in workflow
+    assert "尾帧不得复用首帧" in autodl
+    assert "first_frame" in autodl and "last_frame" in autodl
+
+
+def test_dialogue_roles_are_relationship_agnostic_and_end_with_order_cta():
+    contract = (SKILL_ROOT / "references" / "content-contract.md").read_text(encoding="utf-8")
+    wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
+
+    assert "陪护者/家属" in contract
+    assert "儿子、女儿、孙子、孙女" in contract
+    assert "提问者提出问题" in contract
+    assert "老人回答卖点" in contract
+    assert "下单类行动指令" in contract
+    assert "角色身份不得固定为女儿" in wheelchair
+    assert "自然看向对方" in wheelchair
+    assert "老人自问自答" in wheelchair
+
+
+def test_reasonable_tail_review_keeps_hard_failures_and_user_final_decision():
+    review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
+
+    assert "自然视角变化" in review
+    assert "轻微亮度波动" in review
+    assert "不得单独自动判为硬失败" in review
+    assert "切镜、人物裁切、产品结构变形" in review
+    assert "用户明确验收结论为最终状态" in review
+    assert "保留自动检查证据" in review
 
 
 def test_review_report_contains_one_card_per_video(tmp_path):

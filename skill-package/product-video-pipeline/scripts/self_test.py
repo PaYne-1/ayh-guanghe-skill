@@ -36,7 +36,18 @@ def main() -> int:
     subprocess.run([sys.executable, str(SKILL_ROOT / "scripts" / "workflow_cli.py"), "--help"], check=True, capture_output=True)
     with tempfile.TemporaryDirectory() as temporary:
         payload = Path(temporary) / "payload.json"
-        payload.write_text(json.dumps({"prompt": "固定镜头"}, ensure_ascii=False), encoding="utf-8")
+        payload.write_text(
+            json.dumps(
+                {
+                    "prompt": "固定镜头",
+                    "duration": 15,
+                    "resolution": "768p竖",
+                    "ref_image_0": "data:image/png;base64,AAAA",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         child_environment = dict(os.environ)
         child_environment["PYTHONUTF8"] = "1"
         result = subprocess.run(
@@ -49,7 +60,9 @@ def main() -> int:
         )
         preview = json.loads(result.stdout)
         assert preview["dry_run"] is True
-        assert preview["payload"]["aigc_watermark"] is False
+        assert preview["url"].endswith("/minimax_h3_lightx2v_v5_15s")
+        assert preview["payload"]["resolution"] == "768p竖"
+        assert "aigc_watermark" not in preview["payload"]
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 

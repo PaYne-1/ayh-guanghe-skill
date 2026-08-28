@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable AutoDL.Art MiniMax-H3 V2 task client.
+"""Portable AutoDL.Art MiniMax-H3 ComfyUI workflow client.
 
 The submit payload is supplied as JSON because AutoDL can revise model fields.
 The user must confirm the live API schema, price, and budget at batch startup.
@@ -19,8 +19,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-SUBMIT_URL = "https://www.autodl.art/api/v1/minimax/v2/video_generation"
-QUERY_URL_TEMPLATE = "https://www.autodl.art/api/v1/minimax/v2/query/video_generation/{task_id}"
+COMFYUI_WORKFLOW_BASE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow"
+WORKFLOW_ID = "minimax_h3_lightx2v_v5_15s"
+KNOWN_WORKFLOW_IDS = (
+    WORKFLOW_ID,
+    "minimax_h3_lightx2v",
+    "minimax_h3_image_audio_to_video_v2_15s",
+)
+QUERY_URL_TEMPLATE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow/result/{task_id}"
 
 
 def extract_task_id(response: Dict[str, object]) -> str:
@@ -79,15 +85,18 @@ def submit_payload(
     auth_scheme: str = "bearer",
     dry_run: bool = False,
     confirm_paid: bool = False,
+    workflow_id: str = WORKFLOW_ID,
     timeout: int = 60,
 ) -> Dict[str, object]:
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("提交 payload 必须是 JSON 对象")
-    payload["aigc_watermark"] = False
+    if workflow_id not in KNOWN_WORKFLOW_IDS:
+        raise ValueError(f"不支持的工作流 ID：{workflow_id}")
+    submit_url = f"{COMFYUI_WORKFLOW_BASE}/{workflow_id}"
     preview = {
         "dry_run": dry_run,
-        "url": SUBMIT_URL,
+        "url": submit_url,
         "request_hash": _request_hash(payload),
         "payload": payload,
     }
@@ -98,7 +107,7 @@ def submit_payload(
     api_key = api_key or os.environ.get("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
-    response = _json_request("POST", SUBMIT_URL, api_key, auth_scheme, payload, timeout)
+    response = _json_request("POST", submit_url, api_key, auth_scheme, payload, timeout)
     return {
         **preview,
         "dry_run": False,
@@ -157,7 +166,7 @@ def poll_task(
             time.sleep(min(interval_seconds, 5 * errors))
             continue
         status = _status(response)
-        if status in {"success", "succeeded", "failed", "cancelled", "canceled"}:
+        if status in {"success", "succeeded", "completed", "failed", "cancelled", "canceled"}:
             return response
         time.sleep(interval_seconds)
     return {"task_id": task_id, "status": "poll_timeout"}
@@ -215,12 +224,13 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AutoDL.Art MiniMax-H3 V2 便携客户端")
+    parser = argparse.ArgumentParser(description="AutoDL.Art MiniMax-H3 ComfyUI 工作流便携客户端")
     parser.add_argument("--auth-scheme", choices=("bearer", "raw"), default=os.environ.get("AUTODL_AUTH_SCHEME", "bearer"))
     sub = parser.add_subparsers(dest="command", required=True)
 
     submit = sub.add_parser("submit")
     submit.add_argument("--payload", type=Path, required=True)
+    submit.add_argument("--workflow-id", choices=KNOWN_WORKFLOW_IDS, default=WORKFLOW_ID)
     submit.add_argument("--dry-run", action="store_true")
     submit.add_argument("--confirm-paid", choices=("YES",))
     submit.add_argument("--state", type=Path)
@@ -250,6 +260,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 auth_scheme=args.auth_scheme,
                 dry_run=args.dry_run,
                 confirm_paid=args.confirm_paid == "YES",
+                workflow_id=args.workflow_id,
             )
             if args.state:
                 _write_json(args.state, result)
