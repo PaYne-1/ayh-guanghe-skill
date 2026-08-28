@@ -338,8 +338,9 @@ def initialize_batch(
     for index, point in enumerate(allocated, start=1):
         video_id = f"V{index:03d}"
         project_dir = batch_dir / f"{video_id}_{sanitize_component(point, 20)}_待生成"
-        (project_dir / "失败版本").mkdir(parents=True)
-        (project_dir / "视频版本" / "V01_初次生成").mkdir(parents=True)
+        ensure_work_dirs(project_dir)
+        (work_path(project_dir, "历史版本", "视频版本") / "V01_初次生成").mkdir(parents=True)
+        work_path(project_dir, "历史版本", "失败版本").mkdir(parents=True)
         task_info = {
             "video_id": video_id,
             "selling_point": point,
@@ -350,7 +351,7 @@ def initialize_batch(
             "retry_count": 0,
             "project_dir": str(project_dir.resolve()),
         }
-        atomic_write_json(project_dir / "任务信息.json", task_info)
+        atomic_write_json(work_path(project_dir, "任务状态", "任务信息.json"), task_info)
         task_rows.append(task_info)
         items.append(BatchItem(video_id, point, project_dir))
 
@@ -467,13 +468,14 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     issues = validate_content_package(package, profile)
     if issues:
         raise ValueError("内容校验失败：" + ", ".join(issues))
-    atomic_write_json(item_dir / "策划内容.json", package)
+    ensure_work_dirs(item_dir)
+    atomic_write_json(work_path(item_dir, "生成过程", "策划内容.json"), package)
     atomic_write_text(
         item_dir / "标题.txt",
         f"发布标题：{package['publish_title']}\n封面标题：{package['cover_title']}\n",
     )
-    atomic_write_text(item_dir / "分镜提示词.txt", str(package["storyboard_prompt"]))
-    atomic_write_text(item_dir / "视频提示词.txt", str(package["video_prompt"]))
+    atomic_write_text(work_path(item_dir, "生成过程", "分镜提示词.txt"), str(package["storyboard_prompt"]))
+    atomic_write_text(work_path(item_dir, "生成过程", "视频提示词.txt"), str(package["video_prompt"]))
     tags = " ".join(package["hashtags"])
     atomic_write_text(item_dir / "发布正文.md", f"{package['publish_body']}\n\n{tags}\n")
 
@@ -496,8 +498,8 @@ def record_task(
     estimated_cost_yuan: Optional[str] = None,
 ) -> None:
     item_dir = _find_item(batch_dir, video_id)
-    task_path = item_dir / "任务信息.json"
-    task = read_json(task_path, {})
+    task_path = work_path(item_dir, "任务状态", "任务信息.json")
+    task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
     if task.get("task_id") and task["task_id"] != task_id:
         raise ValueError("该视频已记录其他 task_id，禁止覆盖")
     task.update(
@@ -531,8 +533,9 @@ def build_review_report(batch_dir: Path) -> Path:
     for item_dir in sorted(path for path in batch_dir.iterdir() if path.is_dir() and re.match(r"V\d{3}_", path.name)):
         video_id = item_dir.name.split("_", 1)[0]
         title = (item_dir / "标题.txt").read_text(encoding="utf-8") if (item_dir / "标题.txt").exists() else "未生成标题"
-        task = read_json(item_dir / "任务信息.json", {})
-        auto_qa = (item_dir / "自动验收报告.md").read_text(encoding="utf-8") if (item_dir / "自动验收报告.md").exists() else "尚无自动验收报告"
+        task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
+        auto_qa_path = read_compatible_path(item_dir, "验收记录", "自动验收报告.md")
+        auto_qa = auto_qa_path.read_text(encoding="utf-8") if auto_qa_path.exists() else "尚无自动验收报告"
         video_url = _safe_file_url(item_dir, "视频.mp4")
         cover_url = _safe_file_url(item_dir, "封面图.png")
         video_tag = f'<video controls preload="metadata" src="{video_url}"></video>' if video_url else '<p class="missing">视频尚未下载</p>'
@@ -598,7 +601,7 @@ def record_review(batch_dir: Path, result_path: Path, knowledge_dir: Path) -> No
             f"# 人工验收结果\n\n结果：{decision['decision']}\n\n"
             f"原因：{decision.get('reason', '')}\n\n建议：{decision.get('suggestion', '')}\n"
         )
-        atomic_write_text(item_dir / "人工验收结果.md", item_md)
+        atomic_write_text(work_path(item_dir, "验收记录", "人工验收结果.md"), item_md)
         markdown.append(f"- {decision['video_id']}：{decision['decision']}；{decision.get('reason', '')}")
         if decision["decision"] == "failed":
             candidate_id = f"{decision['video_id']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"

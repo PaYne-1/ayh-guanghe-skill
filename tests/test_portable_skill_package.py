@@ -100,6 +100,12 @@ def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp
     library = json.loads(library_files[0].read_text(encoding="utf-8"))
     assert library["product_name"] == "测试产品甲"
     assert {point["content"] for point in library["selling_points"]} == {"A", "B", "C", "D", "E"}
+    first_item = context.items[0].project_dir
+    assert (first_item / "_工作文件" / "任务状态" / "任务信息.json").exists()
+    assert all((first_item / "_工作文件" / category).is_dir() for category in runtime.WORK_CATEGORIES)
+    assert not (first_item / "任务信息.json").exists()
+    assert not (first_item / "失败版本").exists()
+    assert not (first_item / "视频版本").exists()
 
 
 def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tmp_path):
@@ -194,6 +200,44 @@ def test_content_validator_enforces_confirmed_ayh_contract():
     invalid["script_segments"][-1] = {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "大家可以买。"}
     codes = set(runtime.validate_content_package(invalid, profile))
     assert {"title.required_term", "people.mismatch", "motion.turning_forbidden", "closing.missing_improvement_and_cta"} <= codes
+
+
+def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_操作简单_待生成"
+    item.mkdir()
+    package = {
+        "video_id": "V001",
+        "selling_point": "操作简单",
+        "publish_title": "爸妈也能轻松上手的电动轮椅到底怎么样",
+        "cover_title": "爸妈会操作",
+        "people": [
+            {"id": "P1", "identity": "老人", "gender": "女", "age_feel": "70岁左右", "position": "左侧", "action": "坐在轮椅上", "speaks": True},
+            {"id": "P2", "identity": "家属", "gender": "女", "age_feel": "40岁左右", "position": "右侧", "action": "自然提问", "speaks": True},
+        ],
+        "storyboard_people": ["P1", "P2"],
+        "script_segments": [
+            {"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"},
+            {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"},
+        ],
+        "storyboard_prompt": "竖屏4K，2160×3840，9:16，两位女性始终同框。",
+        "video_prompt": "一镜到底，固定镜头，轮椅沿直线缓慢前进。",
+        "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
+        "hashtags": ["#爱优护电动轮椅", "#ainsnbot高端智能电动轮椅", "#电动轮椅", "#老人专用电动轮椅"],
+    }
+    package_path = tmp_path / "content.json"
+    package_path.write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
+
+    runtime.save_content_package(item, package_path, profile)
+
+    assert (item / "标题.txt").exists()
+    assert (item / "发布正文.md").exists()
+    assert (item / "_工作文件" / "生成过程" / "策划内容.json").exists()
+    assert (item / "_工作文件" / "生成过程" / "分镜提示词.txt").exists()
+    assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
+    assert not (item / "策划内容.json").exists()
 
 
 def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tmp_path):
@@ -399,15 +443,42 @@ def test_review_report_contains_one_card_per_video(tmp_path):
         item = batch / f"{video_id}_卖点_封面"
         item.mkdir(parents=True)
         (item / "标题.txt").write_text(f"{video_id} 电动轮椅标题\n封面标题：出门方便", encoding="utf-8")
-        (item / "任务信息.json").write_text(json.dumps({"video_id": video_id, "task_id": f"task-{video_id}"}), encoding="utf-8")
-        (item / "自动验收报告.md").write_text("自动检查通过", encoding="utf-8")
+        if video_id == "V001":
+            state = item / "_工作文件" / "任务状态" / "任务信息.json"
+            qa = item / "_工作文件" / "验收记录" / "自动验收报告.md"
+            state.parent.mkdir(parents=True)
+            qa.parent.mkdir(parents=True)
+        else:
+            state = item / "任务信息.json"
+            qa = item / "自动验收报告.md"
+        state.write_text(json.dumps({"video_id": video_id, "task_id": f"task-{video_id}"}), encoding="utf-8")
+        qa.write_text(f"{video_id} 自动检查通过", encoding="utf-8")
         (item / "视频.mp4").write_bytes(b"mp4")
     report = runtime.build_review_report(batch)
     html = report.read_text(encoding="utf-8")
     assert report.name == "批次验收报告.html"
     assert html.count('class="video-card"') == 2
+    assert "task-V001" in html and "task-V002" in html
+    assert "V001 自动检查通过" in html and "V002 自动检查通过" in html
     assert "不通过原因" in html
     assert "完成验收" in html
+
+
+def test_record_review_writes_item_evidence_to_work_dir(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260826_批次001"
+    item = batch / "V001_卖点_封面"
+    item.mkdir(parents=True)
+    result = tmp_path / "result.json"
+    result.write_text(
+        json.dumps({"items": [{"video_id": "V001", "decision": "passed", "reason": "", "suggestion": ""}]}),
+        encoding="utf-8",
+    )
+
+    runtime.record_review(batch, result, tmp_path / "knowledge")
+
+    assert (item / "_工作文件" / "验收记录" / "人工验收结果.md").exists()
+    assert not (item / "人工验收结果.md").exists()
 
 
 def test_self_test_is_windows_encoding_safe():
