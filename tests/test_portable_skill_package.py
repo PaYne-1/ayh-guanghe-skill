@@ -63,6 +63,22 @@ def test_skill_package_contains_required_portable_resources():
     assert required <= present
 
 
+def test_clean_first_level_and_work_file_rules_are_documented():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
+
+    assert "第一级只保留" in skill
+    for name in ("视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"):
+        assert name in skill
+    for category in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本"):
+        assert category in workflow
+    assert "_工作文件/任务状态/任务信息.json" in autodl
+    assert "_工作文件/验收记录/自动验收报告.md" in review
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
+
+
 def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp_path):
     runtime = load_script("workflow_cli.py")
     product = tmp_path / "测试产品甲"

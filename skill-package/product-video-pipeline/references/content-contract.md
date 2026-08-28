@@ -67,4 +67,6 @@ python scripts/workflow_cli.py validate-content `
   --profile "profiles/爱优护电动轮椅_淘宝天猫光合.json"
 ```
 
+校验通过后，`标题.txt` 和 `发布正文.md` 保留在单条任务第一级；`策划内容.json`、`分镜提示词.txt`、`视频提示词.txt` 写入 `_工作文件/生成过程`。不得在第一级另存提示词副本或实验版本。
+
 校验失败时修改内容 JSON，再运行；不要绕过校验直接提交视频。
