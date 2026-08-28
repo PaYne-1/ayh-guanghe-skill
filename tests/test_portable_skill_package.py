@@ -6,6 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 
@@ -99,6 +100,63 @@ def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp
     library = json.loads(library_files[0].read_text(encoding="utf-8"))
     assert library["product_name"] == "测试产品甲"
     assert {point["content"] for point in library["selling_points"]} == {"A", "B", "C", "D", "E"}
+
+
+def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    item.mkdir()
+    deliverables = {"视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"}
+    for name in deliverables:
+        (item / name).write_bytes(name.encode("utf-8"))
+    (item / "任务信息.json").write_text("{}", encoding="utf-8")
+    (item / "查询结果.json").write_text("{}", encoding="utf-8")
+    (item / "视频提示词.txt").write_text("一镜到底", encoding="utf-8")
+    (item / "自动验收报告.md").write_text("通过", encoding="utf-8")
+    (item / "视频_V02.mp4").write_bytes(b"old-video")
+    (item / "失败版本").mkdir()
+    (item / "失败版本" / "失败.mp4").write_bytes(b"failed")
+    (item / "视频版本").mkdir()
+    (item / "视频版本" / "V01.mp4").write_bytes(b"v01")
+
+    before = sorted(path.name for path in item.iterdir())
+    preview = runtime.organize_item_dir(item, dry_run=True)
+    assert preview["moved"]
+    assert sorted(path.name for path in item.iterdir()) == before
+
+    result = runtime.organize_item_dir(item)
+    assert result["conflicts"] == []
+    assert {path.name for path in item.iterdir()} == deliverables | {"_工作文件"}
+    assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
+    assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
+    assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
+    assert (item / "_工作文件" / "验收记录" / "自动验收报告.md").exists()
+    assert (item / "_工作文件" / "历史版本" / "视频_V02.mp4").exists()
+    assert (item / "_工作文件" / "历史版本" / "失败版本" / "失败.mp4").exists()
+    assert (item / "_工作文件" / "历史版本" / "视频版本" / "V01.mp4").exists()
+
+    repeated = runtime.organize_item_dir(item)
+    assert repeated["moved"] == []
+    assert repeated["conflicts"] == []
+
+
+def test_organize_item_dir_stops_before_moving_when_target_conflicts(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    target = item / "_工作文件" / "任务状态" / "任务信息.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"new-state")
+    source = item / "任务信息.json"
+    source.write_bytes(b"legacy-state")
+    process_file = item / "视频提示词.txt"
+    process_file.write_text("不能提前移动", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="任务信息.json"):
+        runtime.organize_item_dir(item)
+
+    assert source.read_bytes() == b"legacy-state"
+    assert target.read_bytes() == b"new-state"
+    assert process_file.exists()
 
 
 def test_content_validator_enforces_confirmed_ayh_contract():

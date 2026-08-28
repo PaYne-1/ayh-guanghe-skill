@@ -12,6 +12,7 @@ import hashlib
 import html
 import json
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -54,6 +55,28 @@ IMPROVEMENT_TERMS = (
     "愿意下楼",
     "不用总麻烦",
 )
+DELIVERABLE_NAMES = {"视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"}
+WORK_DIR_NAME = "_工作文件"
+WORK_CATEGORIES = ("任务状态", "生成过程", "验收记录", "历史版本")
+TASK_STATE_PREFIXES = (
+    "任务信息",
+    "查询结果",
+    "查询日志",
+    "提交请求",
+    "提交预览",
+    "正式提交日志",
+    "AutoDL",
+    "dry-run日志",
+)
+REVIEW_PREFIXES = (
+    "自动验收报告",
+    "人工验收",
+    "人工处理说明",
+    "候选经验",
+    "验收对比",
+    "验收预览图",
+)
+HISTORY_DIR_NAMES = {"失败版本", "视频版本"}
 
 
 class BatchItem:
@@ -85,6 +108,83 @@ def read_json(path: Path, default: Optional[object] = None):
     if not path.exists():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ensure_work_dirs(item_dir: Path) -> Dict[str, Path]:
+    work_root = item_dir / WORK_DIR_NAME
+    paths = {category: work_root / category for category in WORK_CATEGORIES}
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def work_path(item_dir: Path, category: str, filename: str) -> Path:
+    if category not in WORK_CATEGORIES:
+        raise ValueError(f"未知工作文件分类：{category}")
+    return item_dir / WORK_DIR_NAME / category / filename
+
+
+def read_compatible_path(item_dir: Path, category: str, filename: str) -> Path:
+    preferred = work_path(item_dir, category, filename)
+    return preferred if preferred.exists() else item_dir / filename
+
+
+def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
+    if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME:
+        return None
+    if path.name in HISTORY_DIR_NAMES:
+        return "历史版本", Path(path.name)
+    if path.name.startswith(TASK_STATE_PREFIXES):
+        return "任务状态", Path(path.name)
+    if path.name.startswith(REVIEW_PREFIXES):
+        return "验收记录", Path(path.name)
+    if path.is_file() and (
+        (path.suffix.casefold() == ".mp4" and path.name != "视频.mp4")
+        or path.name.startswith("封面图_")
+    ):
+        return "历史版本", Path(path.name)
+    return "生成过程", Path(path.name)
+
+
+def _same_file(source: Path, target: Path) -> bool:
+    if not source.is_file() or not target.is_file() or source.stat().st_size != target.stat().st_size:
+        return False
+    return hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(target.read_bytes()).digest()
+
+
+def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object]:
+    item_dir = item_dir.resolve()
+    if not item_dir.is_dir():
+        raise ValueError(f"单条任务目录不存在：{item_dir}")
+
+    plan = []
+    conflicts = []
+    for source in sorted(item_dir.iterdir(), key=lambda path: path.name.casefold()):
+        classification = classify_legacy_entry(source)
+        if classification is None:
+            continue
+        category, relative_target = classification
+        target = work_path(item_dir, category, str(relative_target))
+        if target.exists():
+            if _same_file(source, target):
+                conflicts.append({"source": str(source), "target": str(target), "reason": "内容相同，保留两者"})
+                continue
+            raise FileExistsError(f"目标已存在且内容不同，未移动任何文件：{source.name} -> {target}")
+        plan.append((source, target))
+
+    if not dry_run:
+        ensure_work_dirs(item_dir)
+        for source, target in plan:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+
+    return {
+        "item_dir": str(item_dir),
+        "dry_run": dry_run,
+        "moved": [{"source": str(source), "target": str(target)} for source, target in plan],
+        "unchanged": sorted(name for name in DELIVERABLE_NAMES if (item_dir / name).exists()),
+        "conflicts": conflicts,
+    }
 
 
 def sanitize_component(value: str, limit: int = 36) -> str:
@@ -559,6 +659,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--batch", type=Path, required=True)
     record.add_argument("--result", type=Path, required=True)
     record.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
+
+    organize = subparsers.add_parser("organize", help="安全整理单条任务目录的工作文件")
+    organize.add_argument("--item-dir", type=Path, required=True)
+    organize.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -596,6 +700,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "record-review":
             record_review(args.batch, args.result, args.knowledge_dir)
             print("验收结果已回写，失败项已进入候选经验")
+        elif args.command == "organize":
+            print(json.dumps(organize_item_dir(args.item_dir, dry_run=args.dry_run), ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
