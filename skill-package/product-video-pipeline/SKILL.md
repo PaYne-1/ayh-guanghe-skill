@@ -15,8 +15,9 @@ description: Use when a user needs batch product short-video planning, storyboar
 1. API 已接入后，先说明 dry-run 不联网、不扣费，并在用户同意后验证配置。API 接入或 dry-run 通过不代表用户已授权付费提交。
 2. 每次任务再读 [启动确认单](references/startup-checklist.md) 和 [11 节点流程](references/workflow.md)。所有 API、模式、分辨率、实时价格和预算一次确认完，再运行。
 3. 生成策划前读 [内容契约](references/content-contract.md)。使用爱优护配置时再读 [电动轮椅规则](references/ayh-wheelchair-rules.md) 和 `profiles/爱优护电动轮椅_淘宝天猫光合.json`。
-4. 提交视频前读 [AutoDL H3](references/autodl-h3.md)。先 dry-run；只有启动确认完成且费用获准后才能付费提交。
-5. 成片完成后读 [验收与学习](references/review-learning.md)。最终结果始终由用户人工验收。
+4. 生成分镜图前读 [分镜图生成路由](references/storyboard-generation-routing.md)。分镜图禁止调用当前智能体自身的原生生图能力，必须按 本机 Codex 界面 → ChatGPT 网页端 → 已授权第三方生图 API 的固定顺序生成，不得跳级。
+5. 提交视频前读 [AutoDL H3](references/autodl-h3.md)。先 dry-run；只有启动确认完成且费用获准后才能付费提交。
+6. 成片完成后读 [验收与学习](references/review-learning.md)。最终结果始终由用户人工验收。
 
 ## Start
 
@@ -40,7 +41,8 @@ python scripts/workflow_cli.py init `
 - 五项最终产出分别需要用户明确通过，并在 `_工作文件/验收记录/产出验收记录.json` 中绑定候选路径和 SHA-256；自动检查通过、技术指标通过或等待人工验收都不能晋升一级产出。没有明确通过时，一级目录不保留对应文件。
 - `review-output` 会先保存不可变验收候选快照，再追加验收事件；重新生成同名候选时旧候选进入 `_工作文件/历史版本/候选版本`，不得覆盖或破坏既有验收证据。
 - 所有分镜图默认生成竖屏 4K：`2160×3840`、`9:16`。这是分镜图固定默认值；视频仍按启动确认单选择 `768P` 或 `2K`，两者不得混用。
-- 分镜图最多三次；第三次仍不合格时只暂停该项目，其他项目继续。
+- 分镜图生成执行强制路由，禁止调用当前智能体自身的原生生图能力：本机 Codex 界面 → ChatGPT 网页端 → 已授权第三方生图 API，不得跳级。规则见 [分镜图生成路由](references/storyboard-generation-routing.md)。
+- 分镜图最多三次有效候选（每路由一次）；第三个候选仍不合格时只暂停该项目，其他项目继续。
 - 视频为 V01 初次生成，人工不通过后只允许 V02 重跑一次。
 - 新视频默认先生成独立口播音轨并验收完整性，再使用 `minimax_h3_image_audio_to_video_v2_15s` 生成视频；不得依赖不存在的上一版音轨。
 - 行驶双人对话场景（轮椅真实向前行驶、老人和一名陪护者/家属真实对话、需要保持已通过分镜构图）优先使用 `minimax_h3_lightx2v` 合理尾帧首尾帧方案。陪护者身份按脚本确定，不固定为女儿；其他场景继续使用已确认的现有工作流。
@@ -52,6 +54,7 @@ python scripts/workflow_cli.py init `
 
 | 任务 | 命令/规则 |
 |---|---|
+| 分镜图生成 | 读 [分镜图生成路由](references/storyboard-generation-routing.md)；Codex → ChatGPT → 第三方 API，禁原生生图 |
 | 内容落盘 | `workflow_cli.py validate-content` |
 | 封面文字 | `render_cover.py --title-file _工作文件/生成过程/封面标题.txt`，由程序绘制中文 |
 | 明确验收产出 | `workflow_cli.py review-output`，`passed` 后才晋升一级目录 |
