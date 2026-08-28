@@ -75,7 +75,12 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     for category in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本"):
         assert category in workflow
     assert "_工作文件/任务状态/任务信息.json" in autodl
+    assert '--payload "_工作文件/任务状态/提交请求.json"' in autodl
+    assert '--state "_工作文件/任务状态/提交预览.json"' in autodl
+    assert '--state "_工作文件/任务状态/AutoDL提交结果.json"' in autodl
     assert "_工作文件/验收记录/自动验收报告.md" in review
+    assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
+    assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
     assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.2.0"
 
 
@@ -148,6 +153,8 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
 
     result = runtime.organize_item_dir(item)
     assert result["conflicts"] == []
+    assert result["root_clean"] is True
+    assert result["remaining_forbidden"] == []
     assert {path.name for path in item.iterdir()} == deliverables | {"_工作文件"}
     assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
     assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
@@ -179,6 +186,62 @@ def test_organize_item_dir_stops_before_moving_when_target_conflicts(tmp_path):
     assert source.read_bytes() == b"legacy-state"
     assert target.read_bytes() == b"new-state"
     assert process_file.exists()
+
+
+def test_organize_item_dir_preserves_identical_file_and_directory_duplicates(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    duplicate_file = item / "任务信息.json"
+    target_file = item / "_工作文件" / "任务状态" / "任务信息.json"
+    duplicate_dir = item / "失败版本"
+    target_dir = item / "_工作文件" / "历史版本" / "失败版本"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_bytes(b"same")
+    duplicate_file.write_bytes(b"same")
+    duplicate_dir.mkdir()
+    target_dir.mkdir(parents=True)
+
+    result = runtime.organize_item_dir(item)
+
+    duplicate_root = item / "_工作文件" / "历史版本" / "重复项"
+    assert (duplicate_root / "任务信息.json").read_bytes() == b"same"
+    assert (duplicate_root / "失败版本").is_dir()
+    assert result["root_clean"] is True
+    assert len(result["duplicates"]) == 2
+
+
+def test_batch_organizer_only_visits_video_items_and_preserves_batch_files(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260828_批次001"
+    item = batch / "V001_卖点_待生成"
+    item.mkdir(parents=True)
+    (item / "查询结果.json").write_text("{}", encoding="utf-8")
+    batch_table = batch / "批次任务表.json"
+    batch_table.write_text("{}", encoding="utf-8")
+    confirmation = batch / "启动确认单.json"
+    confirmation.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="单条任务目录"):
+        runtime.organize_item_dir(batch, dry_run=True)
+
+    result = runtime.organize_batch_dir(batch)
+
+    assert result["items"][0]["root_clean"] is True
+    assert batch_table.exists() and confirmation.exists()
+    assert item.exists()
+    assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
+    assert not (batch / "_工作文件").exists()
+
+
+def test_real_world_audio_review_names_are_classified_as_review_evidence(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    candidate = tmp_path / "口播音轨验收_双角色清晰版.md"
+    candidate.write_text("通过", encoding="utf-8")
+
+    category, relative = runtime.classify_legacy_entry(candidate)
+
+    assert category == "验收记录"
+    assert relative.name == candidate.name
 
 
 def test_content_validator_enforces_confirmed_ayh_contract():

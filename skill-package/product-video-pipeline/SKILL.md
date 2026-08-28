@@ -51,7 +51,7 @@ python scripts/workflow_cli.py init `
 | 任务 | 命令/规则 |
 |---|---|
 | 内容落盘 | `workflow_cli.py validate-content` |
-| 封面文字 | `render_cover.py --title-file 封面标题.txt`，由程序绘制中文 |
+| 封面文字 | `render_cover.py --title-file _工作文件/生成过程/封面标题.txt`，由程序绘制中文 |
 | 付费前检查 | `autodl_h3.py submit --dry-run` |
 | 正式提交 | 加 `--confirm-paid YES` |
 | 批量验收 | `workflow_cli.py build-review` |

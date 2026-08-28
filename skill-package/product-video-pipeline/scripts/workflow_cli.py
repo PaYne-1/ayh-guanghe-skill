@@ -70,6 +70,7 @@ TASK_STATE_PREFIXES = (
 )
 REVIEW_PREFIXES = (
     "自动验收报告",
+    "口播音轨验收",
     "人工验收",
     "人工处理说明",
     "候选经验",
@@ -77,6 +78,7 @@ REVIEW_PREFIXES = (
     "验收预览图",
 )
 HISTORY_DIR_NAMES = {"失败版本", "视频版本"}
+ITEM_DIR_PATTERN = re.compile(r"^V\d{3}_")
 
 
 class BatchItem:
@@ -146,18 +148,50 @@ def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
     return "生成过程", Path(path.name)
 
 
-def _same_file(source: Path, target: Path) -> bool:
-    if not source.is_file() or not target.is_file() or source.stat().st_size != target.stat().st_size:
-        return False
-    return hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(target.read_bytes()).digest()
+def _entry_manifest(path: Path) -> Tuple[Tuple[str, str, str], ...]:
+    if path.is_file():
+        return ((path.name, "file", hashlib.sha256(path.read_bytes()).hexdigest()),)
+    if not path.is_dir():
+        return ()
+    manifest = []
+    for child in sorted(path.rglob("*"), key=lambda value: value.relative_to(path).as_posix().casefold()):
+        relative = child.relative_to(path).as_posix()
+        if child.is_dir():
+            manifest.append((relative, "dir", ""))
+        elif child.is_file():
+            manifest.append((relative, "file", hashlib.sha256(child.read_bytes()).hexdigest()))
+        else:
+            manifest.append((relative, "other", ""))
+    return tuple(manifest)
+
+
+def _same_entry(source: Path, target: Path) -> bool:
+    return source.is_file() == target.is_file() and source.is_dir() == target.is_dir() and _entry_manifest(source) == _entry_manifest(target)
+
+
+def _next_duplicate_target(item_dir: Path, source: Path, reserved: set) -> Path:
+    duplicate_root = work_path(item_dir, "历史版本", "重复项")
+    candidate = duplicate_root / source.name
+    counter = 2
+    while candidate.exists() or candidate in reserved:
+        if source.is_file():
+            candidate = duplicate_root / f"{source.stem}_重复{counter}{source.suffix}"
+        else:
+            candidate = duplicate_root / f"{source.name}_重复{counter}"
+        counter += 1
+    return candidate
 
 
 def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object]:
     item_dir = item_dir.resolve()
     if not item_dir.is_dir():
         raise ValueError(f"单条任务目录不存在：{item_dir}")
+    if not ITEM_DIR_PATTERN.match(item_dir.name):
+        raise ValueError(f"不是单条任务目录，名称必须以 VNNN_ 开头：{item_dir}")
 
     plan = []
+    duplicates = []
+    reserved_duplicate_targets = set()
     conflicts = []
     for source in sorted(item_dir.iterdir(), key=lambda path: path.name.casefold()):
         classification = classify_legacy_entry(source)
@@ -166,8 +200,10 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         category, relative_target = classification
         target = work_path(item_dir, category, str(relative_target))
         if target.exists():
-            if _same_file(source, target):
-                conflicts.append({"source": str(source), "target": str(target), "reason": "内容相同，保留两者"})
+            if _same_entry(source, target):
+                duplicate_target = _next_duplicate_target(item_dir, source, reserved_duplicate_targets)
+                reserved_duplicate_targets.add(duplicate_target)
+                duplicates.append((source, target, duplicate_target))
                 continue
             raise FileExistsError(f"目标已存在且内容不同，未移动任何文件：{source.name} -> {target}")
         plan.append((source, target))
@@ -177,13 +213,49 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         for source, target in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
+        for source, _existing, duplicate_target in duplicates:
+            duplicate_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(duplicate_target))
+
+    planned_sources = {source for source, _target in plan} | {source for source, _existing, _target in duplicates}
+    if dry_run:
+        remaining_forbidden = [
+            path.name
+            for path in item_dir.iterdir()
+            if classify_legacy_entry(path) is not None and path not in planned_sources
+        ]
+    else:
+        remaining_forbidden = [path.name for path in item_dir.iterdir() if classify_legacy_entry(path) is not None]
 
     return {
         "item_dir": str(item_dir),
         "dry_run": dry_run,
         "moved": [{"source": str(source), "target": str(target)} for source, target in plan],
+        "duplicates": [
+            {"source": str(source), "existing": str(existing), "archived": str(duplicate_target)}
+            for source, existing, duplicate_target in duplicates
+        ],
         "unchanged": sorted(name for name in DELIVERABLE_NAMES if (item_dir / name).exists()),
         "conflicts": conflicts,
+        "root_clean": not remaining_forbidden,
+        "remaining_forbidden": sorted(remaining_forbidden),
+    }
+
+
+def organize_batch_dir(batch_dir: Path, dry_run: bool = False) -> Dict[str, object]:
+    batch_dir = batch_dir.resolve()
+    if not batch_dir.is_dir():
+        raise ValueError(f"批次目录不存在：{batch_dir}")
+    item_dirs = sorted(
+        (path for path in batch_dir.iterdir() if path.is_dir() and ITEM_DIR_PATTERN.match(path.name)),
+        key=lambda path: path.name.casefold(),
+    )
+    if not item_dirs:
+        raise ValueError(f"批次目录第一层没有 VNNN_ 单条任务目录：{batch_dir}")
+    return {
+        "batch_dir": str(batch_dir),
+        "dry_run": dry_run,
+        "items": [organize_item_dir(item_dir, dry_run=dry_run) for item_dir in item_dirs],
     }
 
 
@@ -664,7 +736,9 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
 
     organize = subparsers.add_parser("organize", help="安全整理单条任务目录的工作文件")
-    organize.add_argument("--item-dir", type=Path, required=True)
+    organize_target = organize.add_mutually_exclusive_group(required=True)
+    organize_target.add_argument("--item-dir", type=Path)
+    organize_target.add_argument("--batch", type=Path)
     organize.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -704,7 +778,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record_review(args.batch, args.result, args.knowledge_dir)
             print("验收结果已回写，失败项已进入候选经验")
         elif args.command == "organize":
-            print(json.dumps(organize_item_dir(args.item_dir, dry_run=args.dry_run), ensure_ascii=False, indent=2))
+            result = (
+                organize_item_dir(args.item_dir, dry_run=args.dry_run)
+                if args.item_dir is not None
+                else organize_batch_dir(args.batch, dry_run=args.dry_run)
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)

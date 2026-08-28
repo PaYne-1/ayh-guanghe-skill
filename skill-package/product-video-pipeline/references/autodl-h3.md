@@ -23,7 +23,7 @@ AutoDL 可能调整请求字段、鉴权格式和价格。任务开始时必须�
 - 使用已验收的 `分镜图.png` 作为 `ref_image_0`，通过公网 URL 或 `data:image/...;base64,...` 传入；不得把本地文件路径直接提交给服务器。
 - `prompt` 包含人物清单、台词、说话顺序、音色年龄感、唯一卖点、固定镜头和画面限制。
 - `duration` 固定为 `15`，`resolution` 使用 `768p竖` 或任务开始时确认的工作流枚举值。
-- 保存最终 payload 为本条 `提交请求.json`，请求哈希必须覆盖 `prompt`、`ref_image_0`、`resolution` 和 `duration`。
+- 保存最终 payload 为本条 `_工作文件/任务状态/提交请求.json`，请求哈希必须覆盖 `prompt`、`ref_image_0`、`resolution` 和 `duration`。
 
 因为服务端字段可能更新，便携脚本直接读取用户在任务开始时确认的完整 JSON payload，不猜测未知字段。
 
@@ -52,9 +52,9 @@ AutoDL 可能调整请求字段、鉴权格式和价格。任务开始时必须�
 ```powershell
 python scripts/autodl_h3.py submit `
   --workflow-id minimax_h3_image_audio_to_video_v2_15s `
-  --payload "提交请求.json" `
+  --payload "_工作文件/任务状态/提交请求.json" `
   --dry-run `
-  --state "提交预览.json"
+  --state "_工作文件/任务状态/提交预览.json"
 ```
 
 检查工作流端点、payload、分辨率和 request_hash。dry-run 不联网、不产生费用。
@@ -68,9 +68,9 @@ $env:AUTODL_API_KEY = "从安全凭据读取"
 $env:AUTODL_AUTH_SCHEME = "bearer"  # API 文档要求原始 Token 时改为 raw
 python scripts/autodl_h3.py submit `
   --workflow-id minimax_h3_image_audio_to_video_v2_15s `
-  --payload "提交请求.json" `
+  --payload "_工作文件/任务状态/提交请求.json" `
   --confirm-paid YES `
-  --state "AutoDL提交结果.json"
+  --state "_工作文件/任务状态/AutoDL提交结果.json"
 ```
 
 成功后立即运行 `workflow_cli.py record-task`，把 task_id 同步到项目和批次。若客户端超时且无法判断服务端是否已收到，不得自动重复提交。
