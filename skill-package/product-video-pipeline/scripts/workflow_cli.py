@@ -213,18 +213,13 @@ def _snapshot_review_candidate(
     source_path: Path,
     digest: str,
     confirmed_at: datetime,
+    event_id: str,
 ) -> Path:
     artifact = Path(artifact_name)
     snapshot_dir = work_path(item_dir, "历史版本", "验收候选") / artifact.stem
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     timestamp = confirmed_at.strftime("%Y%m%dT%H%M%S%f%z")
-    snapshot = snapshot_dir / f"{timestamp}_{digest[:12]}{artifact.suffix}"
-    counter = 2
-    while snapshot.exists():
-        if snapshot.is_file() and _sha256_file(snapshot) == digest:
-            return snapshot
-        snapshot = snapshot_dir / f"{timestamp}_{digest[:12]}_{counter}{artifact.suffix}"
-        counter += 1
+    snapshot = snapshot_dir / f"{timestamp}_{digest[:12]}_{event_id}{artifact.suffix}"
     temporary = snapshot.with_suffix(snapshot.suffix + f".tmp.{uuid.uuid4().hex}")
     try:
         shutil.copyfile(source_path, temporary)
@@ -273,9 +268,10 @@ def record_artifact_decision(
     if confirmed_at.utcoffset() is None:
         raise ValueError("确认时间必须包含时区")
     digest = _sha256_file(source_path)
-    snapshot = _snapshot_review_candidate(item_dir, artifact_name, source_path, digest, confirmed_at)
+    event_id = str(uuid.uuid4())
+    snapshot = _snapshot_review_candidate(item_dir, artifact_name, source_path, digest, confirmed_at, event_id)
     event: Dict[str, object] = {
-        "event_id": str(uuid.uuid4()),
+        "event_id": event_id,
         "artifact_name": artifact_name,
         "source_path": snapshot.relative_to(item_dir).as_posix(),
         "submitted_source_path": relative_source.as_posix(),
@@ -599,6 +595,12 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         ]
     else:
         remaining_forbidden = [path.name for path in item_dir.iterdir() if classify_legacy_entry(path) is not None]
+    audit_error_names = [
+        str(error.get("artifact_name"))
+        for error in output_audit.get("errors", [])
+        if isinstance(error, dict) and error.get("artifact_name")
+    ]
+    remaining_forbidden = sorted(set(remaining_forbidden + audit_error_names))
 
     return {
         "item_dir": str(item_dir),
@@ -610,8 +612,8 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         ],
         "unchanged": sorted(name for name in DELIVERABLE_NAMES if (item_dir / name).exists()),
         "conflicts": conflicts,
-        "root_clean": not remaining_forbidden,
-        "remaining_forbidden": sorted(remaining_forbidden),
+        "root_clean": not remaining_forbidden and not _audit_result_has_errors(output_audit),
+        "remaining_forbidden": remaining_forbidden,
         "output_audit": output_audit,
     }
 
@@ -912,20 +914,33 @@ def _write_candidate_preserving_previous(item_dir: Path, filename: str, text: st
     target = work_path(item_dir, "生成过程", filename)
     encoded = text.encode("utf-8")
     new_digest = hashlib.sha256(encoded).hexdigest()
+    old_digest = ""
     if target.exists():
         if not target.is_file():
             raise ValueError(f"候选路径不是普通文件：{target}")
         old_digest = _sha256_file(target)
         if old_digest == new_digest:
             return
-        archive = _unique_artifact_archive_path(item_dir, "候选版本", filename, old_digest, now)
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        target.replace(archive)
     temporary = target.with_name(target.name + f".tmp.{uuid.uuid4().hex}")
+    archived_previous: Optional[Path] = None
     try:
         temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_bytes(encoded)
-        temporary.replace(target)
+        if _sha256_file(temporary) != new_digest:
+            raise OSError(f"候选临时文件哈希校验失败：{target}")
+        if target.exists():
+            archived_previous = _unique_artifact_archive_path(item_dir, "候选版本", filename, old_digest, now)
+            archived_previous.parent.mkdir(parents=True, exist_ok=True)
+            target.replace(archived_previous)
+        try:
+            temporary.replace(target)
+        except Exception as write_error:
+            if archived_previous is not None and archived_previous.exists() and not target.exists():
+                try:
+                    archived_previous.replace(target)
+                except Exception as rollback_error:
+                    raise OSError(f"候选更新失败且旧候选回滚失败：{rollback_error}") from write_error
+            raise
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -1036,6 +1051,16 @@ def _review_media(batch_dir: Path, item_dir: Path, artifact_name: str) -> Dict[s
         "source_path": relative_item,
         "sha256": _sha256_file(path),
     }
+
+
+def _organization_result_has_errors(result: Dict[str, object]) -> bool:
+    audit = result.get("output_audit")
+    if isinstance(audit, dict) and _audit_result_has_errors(audit):
+        return True
+    items = result.get("items", [])
+    return isinstance(items, list) and any(
+        isinstance(item, dict) and _organization_result_has_errors(item) for item in items
+    )
 
 
 def build_review_report(batch_dir: Path) -> Path:
@@ -1242,6 +1267,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else organize_batch_dir(args.batch, dry_run=args.dry_run)
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            if _organization_result_has_errors(result):
+                return 2
         elif args.command == "review-output":
             event = record_artifact_decision(
                 args.item_dir,

@@ -362,15 +362,57 @@ def test_concurrent_artifact_decisions_do_not_lose_events(tmp_path, monkeypatch)
         original_write(path, value)
 
     monkeypatch.setattr(runtime, "atomic_write_json", slow_write)
+    same_time = datetime.fromisoformat("2026-08-28T12:00:00+08:00")
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [
-            pool.submit(runtime.record_artifact_decision, item, "视频.mp4", candidate, "passed", f"用户{i}", "明确通过")
+            pool.submit(
+                runtime.record_artifact_decision,
+                item,
+                "视频.mp4",
+                candidate,
+                "passed",
+                f"用户{i}",
+                "明确通过",
+                same_time,
+            )
             for i in range(8)
         ]
         for future in futures:
             future.result()
 
     assert len(runtime.load_approval_events(item)) == 8
+
+
+def test_separate_processes_append_artifact_decisions_without_loss(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"video")
+    command_base = [
+        sys.executable,
+        str(SKILL_ROOT / "scripts" / "workflow_cli.py"),
+        "review-output",
+        "--item-dir",
+        str(item),
+        "--artifact",
+        "视频.mp4",
+        "--source",
+        str(candidate.relative_to(item)),
+        "--decision",
+        "failed",
+        "--feedback",
+        "明确不通过",
+    ]
+    processes = [
+        subprocess.Popen(command_base + ["--confirmed-by", f"用户{i}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for i in range(4)
+    ]
+
+    results = [process.communicate(timeout=20) + (process.returncode,) for process in processes]
+
+    assert all(return_code == 0 for _stdout, _stderr, return_code in results)
+    assert len(runtime.load_approval_events(item)) == 4
 
 
 def test_promote_approved_artifact_archives_previous_root_and_keeps_candidate(tmp_path):
@@ -554,6 +596,20 @@ def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path)
 
     assert exit_code == 2
     assert (item / "视频.mp4").is_dir()
+
+
+def test_organize_cli_propagates_output_audit_errors_and_root_is_not_clean(tmp_path, capsys):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    (item / "视频.mp4").mkdir(parents=True)
+
+    exit_code = runtime.main(["organize", "--item-dir", str(item)])
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert output["root_clean"] is False
+    assert "视频.mp4" in output["remaining_forbidden"]
+    assert output["output_audit"]["errors"]
 
 
 def test_content_validator_enforces_confirmed_ayh_contract():
