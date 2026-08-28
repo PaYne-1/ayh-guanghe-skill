@@ -155,7 +155,8 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert result["conflicts"] == []
     assert result["root_clean"] is True
     assert result["remaining_forbidden"] == []
-    assert {path.name for path in item.iterdir()} == deliverables | {"_工作文件"}
+    assert {path.name for path in item.iterdir()} == {"_工作文件"}
+    assert len(result["output_audit"]["demoted"]) == 5
     assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
     assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
@@ -163,6 +164,8 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert (item / "_工作文件" / "历史版本" / "视频_V02.mp4").exists()
     assert (item / "_工作文件" / "历史版本" / "失败版本" / "失败.mp4").exists()
     assert (item / "_工作文件" / "历史版本" / "视频版本" / "V01.mp4").exists()
+    demoted_files = list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())
+    assert {path.read_bytes() for path in demoted_files} == {name.encode("utf-8") for name in deliverables}
 
     repeated = runtime.organize_item_dir(item)
     assert repeated["moved"] == []
@@ -305,6 +308,153 @@ def test_approval_events_are_append_only_and_latest_event_wins(tmp_path):
     assert runtime.approval_log_path(item).exists()
 
 
+def test_promote_approved_artifact_archives_previous_root_and_keeps_candidate(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "最终候选标题.txt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"approved-title")
+    old_root = item / "标题.txt"
+    old_root.write_bytes(b"old-title")
+    event = runtime.record_artifact_decision(
+        item,
+        "标题.txt",
+        candidate,
+        "passed",
+        "用户",
+        "标题明确通过",
+        now=datetime.fromisoformat("2026-08-28T13:00:00+08:00"),
+    )
+
+    promoted = runtime.promote_approved_artifact(item, event)
+
+    assert promoted == old_root
+    assert old_root.read_bytes() == b"approved-title"
+    assert candidate.read_bytes() == b"approved-title"
+    archived = list((item / "_工作文件" / "历史版本" / "已撤换产出").iterdir())
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == b"old-title"
+    assert runtime._sha256_file(old_root) == event["sha256"]
+
+
+@pytest.mark.parametrize("decision", [None, "failed", "revoked"])
+def test_audit_promoted_outputs_demotes_missing_failed_or_revoked_evidence(tmp_path, decision):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选正文.md"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"body")
+    root_output = item / "发布正文.md"
+    root_output.write_bytes(b"body")
+    if decision:
+        runtime.record_artifact_decision(
+            item,
+            "发布正文.md",
+            candidate,
+            decision,
+            "用户",
+            "明确不通过" if decision == "failed" else "明确撤销",
+            now=datetime.fromisoformat("2026-08-28T13:05:00+08:00"),
+        )
+
+    result = runtime.audit_promoted_outputs(
+        item,
+        now=datetime.fromisoformat("2026-08-28T13:10:00+08:00"),
+    )
+
+    assert not root_output.exists()
+    assert len(result["demoted"]) == 1
+    archived = list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == b"body"
+
+
+def test_audit_promoted_outputs_demotes_hash_changed_after_pass(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选分镜.png"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"approved-storyboard")
+    event = runtime.record_artifact_decision(
+        item,
+        "分镜图.png",
+        candidate,
+        "passed",
+        "用户",
+        "分镜明确通过",
+        now=datetime.fromisoformat("2026-08-28T13:20:00+08:00"),
+    )
+    runtime.promote_approved_artifact(item, event)
+    (item / "分镜图.png").write_bytes(b"tampered")
+
+    result = runtime.audit_promoted_outputs(item)
+
+    assert not (item / "分镜图.png").exists()
+    assert len(result["demoted"]) == 1
+    assert list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())[0].read_bytes() == b"tampered"
+
+
+def test_legacy_review_cannot_promote_and_audit_is_idempotent(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    review_dir = item / "_工作文件" / "验收记录"
+    review_dir.mkdir(parents=True)
+    (review_dir / "人工验收结果.md").write_text("结果：passed", encoding="utf-8")
+    (item / "封面图.png").write_bytes(b"legacy-cover")
+
+    first = runtime.audit_promoted_outputs(item)
+    second = runtime.audit_promoted_outputs(item)
+
+    assert len(first["demoted"]) == 1
+    assert second["demoted"] == []
+    assert not runtime.approval_log_path(item).exists()
+    assert not (item / "封面图.png").exists()
+
+
+def test_review_output_cli_accepts_relative_candidate_and_promotes_passed_file(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    relative = Path("_工作文件/生成过程/候选视频.mp4")
+    candidate = item / relative
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"approved-video")
+
+    exit_code = runtime.main(
+        [
+            "review-output",
+            "--item-dir",
+            str(item),
+            "--artifact",
+            "视频.mp4",
+            "--source",
+            str(relative),
+            "--decision",
+            "passed",
+            "--confirmed-by",
+            "用户",
+            "--feedback",
+            "视频明确通过",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (item / "视频.mp4").read_bytes() == b"approved-video"
+
+
+def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260828_批次001"
+    item = batch / "V001_卖点_待生成"
+    item.mkdir(parents=True)
+    root_output = item / "标题.txt"
+    root_output.write_bytes(b"unapproved")
+
+    exit_code = runtime.main(["audit-outputs", "--batch", str(batch), "--dry-run"])
+
+    assert exit_code == 0
+    assert root_output.exists()
+
+
 def test_content_validator_enforces_confirmed_ayh_contract():
     runtime = load_script("workflow_cli.py")
     profile = json.loads(
@@ -372,8 +522,10 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
 
     runtime.save_content_package(item, package_path, profile)
 
-    assert (item / "标题.txt").exists()
-    assert (item / "发布正文.md").exists()
+    assert not (item / "标题.txt").exists()
+    assert not (item / "发布正文.md").exists()
+    assert (item / "_工作文件" / "生成过程" / "标题.txt").exists()
+    assert (item / "_工作文件" / "生成过程" / "发布正文.md").exists()
     assert (item / "_工作文件" / "生成过程" / "策划内容.json").exists()
     assert (item / "_工作文件" / "生成过程" / "分镜提示词.txt").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
@@ -602,6 +754,24 @@ def test_review_report_contains_one_card_per_video(tmp_path):
     assert "V001 自动检查通过" in html and "V002 自动检查通过" in html
     assert "不通过原因" in html
     assert "完成验收" in html
+
+
+def test_review_report_ignores_unapproved_root_video_until_hash_approved(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260828_批次001"
+    item = batch / "V001_卖点_待生成"
+    candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"candidate-video")
+    (item / "视频.mp4").write_bytes(b"unapproved-video")
+
+    unapproved_html = runtime.build_review_report(batch).read_text(encoding="utf-8")
+    assert "<video controls" not in unapproved_html
+
+    event = runtime.record_artifact_decision(item, "视频.mp4", candidate, "passed", "用户", "视频明确通过")
+    runtime.promote_approved_artifact(item, event)
+    approved_html = runtime.build_review_report(batch).read_text(encoding="utf-8")
+    assert "<video controls" in approved_html
 
 
 def test_record_review_writes_item_evidence_to_work_dir(tmp_path):

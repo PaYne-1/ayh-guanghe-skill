@@ -189,6 +189,7 @@ def record_artifact_decision(
     if not feedback.strip():
         raise ValueError("验收反馈不能为空")
 
+    source_path = source_path if source_path.is_absolute() else item_dir / source_path
     source_path = source_path.resolve()
     try:
         relative_source = source_path.relative_to(item_dir)
@@ -216,6 +217,177 @@ def record_artifact_decision(
     events.append(event)
     atomic_write_json(approval_log_path(item_dir), {"events": events})
     return event
+
+
+def _unique_artifact_archive_path(
+    item_dir: Path,
+    subdirectory: str,
+    artifact_name: str,
+    sha256: str,
+    now: datetime,
+) -> Path:
+    archive_dir = work_path(item_dir, "历史版本", subdirectory)
+    artifact = Path(artifact_name)
+    timestamp = now.strftime("%Y%m%dT%H%M%S%z")
+    base_name = f"{artifact.stem}_{timestamp}_{sha256[:8]}"
+    candidate = archive_dir / f"{base_name}{artifact.suffix}"
+    counter = 2
+    while candidate.exists():
+        candidate = archive_dir / f"{base_name}_{counter}{artifact.suffix}"
+        counter += 1
+    return candidate
+
+
+def _archive_root_artifact(
+    item_dir: Path,
+    root_artifact: Path,
+    subdirectory: str,
+    now: datetime,
+    *,
+    dry_run: bool = False,
+) -> Path:
+    digest = _sha256_file(root_artifact)
+    target = _unique_artifact_archive_path(item_dir, subdirectory, root_artifact.name, digest, now)
+    if not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(root_artifact), str(target))
+    return target
+
+
+def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
+    item_dir = item_dir.resolve()
+    artifact_name = str(event.get("artifact_name", ""))
+    if artifact_name not in DELIVERABLE_NAMES or event.get("decision") != "passed":
+        raise ValueError("只有五项固定产出的 passed 事件可以晋升")
+    events = load_approval_events(item_dir)
+    recorded = next((value for value in events if value.get("event_id") == event.get("event_id")), None)
+    if recorded is None:
+        raise ValueError("passed 事件尚未写入产出验收记录")
+    digest = str(recorded.get("sha256", ""))
+    latest = latest_artifact_decision(events, artifact_name, digest)
+    if latest is None or latest.get("event_id") != recorded.get("event_id") or latest.get("decision") != "passed":
+        raise ValueError("该候选的最新验收决定不是 passed")
+
+    source = (item_dir / str(recorded["source_path"])).resolve()
+    try:
+        source.relative_to(item_dir)
+    except ValueError as exc:
+        raise ValueError("验收事件的候选路径已越出任务目录") from exc
+    if not source.is_file() or _sha256_file(source) != digest:
+        raise ValueError("候选文件缺失或哈希已变化，不能晋升")
+
+    root_artifact = item_dir / artifact_name
+    if root_artifact.exists():
+        if not root_artifact.is_file():
+            raise ValueError(f"一级固定产出路径不是文件：{root_artifact}")
+        if _sha256_file(root_artifact) == digest:
+            return root_artifact
+        confirmed_at = datetime.fromisoformat(str(recorded["confirmed_at"]))
+        _archive_root_artifact(item_dir, root_artifact, "已撤换产出", confirmed_at)
+
+    temporary = root_artifact.with_suffix(root_artifact.suffix + ".tmp")
+    shutil.copyfile(source, temporary)
+    temporary.replace(root_artifact)
+    if _sha256_file(root_artifact) != digest:
+        raise OSError(f"晋升后哈希校验失败：{root_artifact}")
+    return root_artifact
+
+
+def audit_promoted_outputs(
+    item_dir: Path,
+    dry_run: bool = False,
+    now: Optional[datetime] = None,
+) -> Dict[str, object]:
+    item_dir = item_dir.resolve()
+    if not item_dir.is_dir() or not ITEM_DIR_PATTERN.match(item_dir.name):
+        raise ValueError(f"不是有效的单条任务目录：{item_dir}")
+    audit_time = now or datetime.now().astimezone()
+    if audit_time.utcoffset() is None:
+        raise ValueError("审计时间必须包含时区")
+
+    errors: List[Dict[str, object]] = []
+    try:
+        events = load_approval_events(item_dir)
+    except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        events = []
+        errors.append({"artifact_name": None, "error": str(exc)})
+
+    valid = []
+    demoted = []
+    missing = []
+    for artifact_name in sorted(DELIVERABLE_NAMES):
+        root_artifact = item_dir / artifact_name
+        if not root_artifact.exists():
+            missing.append(artifact_name)
+            continue
+        if not root_artifact.is_file():
+            errors.append({"artifact_name": artifact_name, "error": "一级固定产出路径不是文件"})
+            continue
+        digest = _sha256_file(root_artifact)
+        try:
+            latest = latest_artifact_decision(events, artifact_name, digest)
+        except (ValueError, KeyError) as exc:
+            latest = None
+            errors.append({"artifact_name": artifact_name, "error": str(exc)})
+        if latest is not None and latest.get("decision") == "passed":
+            valid.append({"artifact_name": artifact_name, "sha256": digest, "event": latest})
+            continue
+        target = _archive_root_artifact(
+            item_dir,
+            root_artifact,
+            "未通过或待验收",
+            audit_time,
+            dry_run=dry_run,
+        )
+        demoted.append(
+            {
+                "artifact_name": artifact_name,
+                "sha256": digest,
+                "target": str(target),
+                "latest_event": latest,
+            }
+        )
+
+    return {
+        "item_dir": str(item_dir),
+        "dry_run": dry_run,
+        "promoted": [],
+        "valid": valid,
+        "demoted": demoted,
+        "missing": missing,
+        "errors": errors,
+    }
+
+
+def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, object]:
+    batch_dir = batch_dir.resolve()
+    if not batch_dir.is_dir():
+        raise ValueError(f"批次目录不存在：{batch_dir}")
+    item_dirs = sorted(
+        (path for path in batch_dir.iterdir() if path.is_dir() and ITEM_DIR_PATTERN.match(path.name)),
+        key=lambda path: path.name.casefold(),
+    )
+    if not item_dirs:
+        raise ValueError(f"批次目录第一层没有 VNNN_ 单条任务目录：{batch_dir}")
+    return {
+        "batch_dir": str(batch_dir),
+        "dry_run": dry_run,
+        "items": [audit_promoted_outputs(item_dir, dry_run=dry_run) for item_dir in item_dirs],
+    }
+
+
+def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
+    if artifact_name not in DELIVERABLE_NAMES:
+        raise ValueError(f"未知产出名称：{artifact_name}")
+    root_artifact = item_dir / artifact_name
+    if not root_artifact.is_file():
+        return None
+    try:
+        digest = _sha256_file(root_artifact)
+        latest = latest_artifact_decision(load_approval_events(item_dir), artifact_name, digest)
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return None
+    return root_artifact if latest is not None and latest.get("decision") == "passed" else None
 
 
 def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
@@ -276,6 +448,7 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
     if not ITEM_DIR_PATTERN.match(item_dir.name):
         raise ValueError(f"不是单条任务目录，名称必须以 VNNN_ 开头：{item_dir}")
 
+    output_audit = audit_promoted_outputs(item_dir, dry_run=True)
     plan = []
     duplicates = []
     reserved_duplicate_targets = set()
@@ -296,6 +469,7 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         plan.append((source, target))
 
     if not dry_run:
+        output_audit = audit_promoted_outputs(item_dir)
         ensure_work_dirs(item_dir)
         for source, target in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +500,7 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         "conflicts": conflicts,
         "root_clean": not remaining_forbidden,
         "remaining_forbidden": sorted(remaining_forbidden),
+        "output_audit": output_audit,
     }
 
 
@@ -630,13 +805,13 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     ensure_work_dirs(item_dir)
     atomic_write_json(work_path(item_dir, "生成过程", "策划内容.json"), package)
     atomic_write_text(
-        item_dir / "标题.txt",
+        work_path(item_dir, "生成过程", "标题.txt"),
         f"发布标题：{package['publish_title']}\n封面标题：{package['cover_title']}\n",
     )
     atomic_write_text(work_path(item_dir, "生成过程", "分镜提示词.txt"), str(package["storyboard_prompt"]))
     atomic_write_text(work_path(item_dir, "生成过程", "视频提示词.txt"), str(package["video_prompt"]))
     tags = " ".join(package["hashtags"])
-    atomic_write_text(item_dir / "发布正文.md", f"{package['publish_body']}\n\n{tags}\n")
+    atomic_write_text(work_path(item_dir, "生成过程", "发布正文.md"), f"{package['publish_body']}\n\n{tags}\n")
 
 
 def _find_item(batch_dir: Path, video_id: str) -> Path:
@@ -682,8 +857,8 @@ def record_task(
 
 
 def _safe_file_url(item_dir: Path, filename: str) -> str:
-    path = item_dir / filename
-    return quote(f"{item_dir.name}/{filename}") if path.exists() else ""
+    path = validated_promoted_artifact_path(item_dir, filename)
+    return quote(f"{item_dir.name}/{filename}") if path is not None else ""
 
 
 def build_review_report(batch_dir: Path) -> Path:
@@ -691,7 +866,8 @@ def build_review_report(batch_dir: Path) -> Path:
     cards = []
     for item_dir in sorted(path for path in batch_dir.iterdir() if path.is_dir() and re.match(r"V\d{3}_", path.name)):
         video_id = item_dir.name.split("_", 1)[0]
-        title = (item_dir / "标题.txt").read_text(encoding="utf-8") if (item_dir / "标题.txt").exists() else "未生成标题"
+        title_path = validated_promoted_artifact_path(item_dir, "标题.txt")
+        title = title_path.read_text(encoding="utf-8") if title_path is not None else "标题尚未明确验收通过"
         task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
         auto_qa_path = read_compatible_path(item_dir, "验收记录", "自动验收报告.md")
         auto_qa = auto_qa_path.read_text(encoding="utf-8") if auto_qa_path.exists() else "尚无自动验收报告"
@@ -827,6 +1003,20 @@ def build_parser() -> argparse.ArgumentParser:
     organize_target.add_argument("--item-dir", type=Path)
     organize_target.add_argument("--batch", type=Path)
     organize.add_argument("--dry-run", action="store_true")
+
+    output_review = subparsers.add_parser("review-output", help="记录单项产出验收决定并按规则晋升或撤下")
+    output_review.add_argument("--item-dir", type=Path, required=True)
+    output_review.add_argument("--artifact", choices=sorted(DELIVERABLE_NAMES), required=True)
+    output_review.add_argument("--source", type=Path, required=True)
+    output_review.add_argument("--decision", choices=sorted(APPROVAL_DECISIONS), required=True)
+    output_review.add_argument("--confirmed-by", required=True)
+    output_review.add_argument("--feedback", required=True)
+
+    output_audit = subparsers.add_parser("audit-outputs", help="审计并撤下没有明确通过证据的一级产出")
+    output_audit_target = output_audit.add_mutually_exclusive_group(required=True)
+    output_audit_target.add_argument("--item-dir", type=Path)
+    output_audit_target.add_argument("--batch", type=Path)
+    output_audit.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -869,6 +1059,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 organize_item_dir(args.item_dir, dry_run=args.dry_run)
                 if args.item_dir is not None
                 else organize_batch_dir(args.batch, dry_run=args.dry_run)
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "review-output":
+            event = record_artifact_decision(
+                args.item_dir,
+                args.artifact,
+                args.source,
+                args.decision,
+                args.confirmed_by,
+                args.feedback,
+            )
+            if args.decision == "passed":
+                result = {"event": event, "promoted": str(promote_approved_artifact(args.item_dir, event))}
+            else:
+                result = {"event": event, "audit": audit_promoted_outputs(args.item_dir)}
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "audit-outputs":
+            result = (
+                audit_promoted_outputs(args.item_dir, dry_run=args.dry_run)
+                if args.item_dir is not None
+                else audit_batch_outputs(args.batch, dry_run=args.dry_run)
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
