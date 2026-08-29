@@ -24,6 +24,8 @@ def main() -> int:
         "references/ayh-wheelchair-rules.md",
         "references/autodl-h3.md",
         "references/review-learning.md",
+        "references/automatic-learning-rules.md",
+        "references/image-generation-routing.md",
         "references/install.md",
         "scripts/workflow_cli.py",
         "scripts/autodl_h3.py",
@@ -33,8 +35,123 @@ def main() -> int:
     if missing:
         print("缺少文件：" + ", ".join(missing), file=sys.stderr)
         return 1
-    subprocess.run([sys.executable, str(SKILL_ROOT / "scripts" / "workflow_cli.py"), "--help"], check=True, capture_output=True)
+    child_environment = dict(os.environ)
+    child_environment["PYTHONUTF8"] = "1"
+    workflow_script = SKILL_ROOT / "scripts" / "workflow_cli.py"
+    workflow_help = subprocess.run(
+        [sys.executable, str(workflow_script), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=child_environment,
+    ).stdout
+    for command in ("record-issue", "validate-learning", "prepare-node-rules", "start-rerun"):
+        assert command in workflow_help
     with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(temporary)
+        batch = temporary_root / "batch"
+        item = batch / "V001_point_pending"
+        state_dir = item / "_工作文件" / "任务状态"
+        state_dir.mkdir(parents=True)
+        (batch / "启动确认单.json").write_text(
+            json.dumps({"run_mode": "learning", "product_name": "self-test", "product_id": "self-test"}),
+            encoding="utf-8",
+        )
+        (state_dir / "任务信息.json").write_text(
+            json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+        )
+        knowledge = temporary_root / "knowledge"
+        issue_result = subprocess.run(
+            [
+                sys.executable,
+                str(workflow_script),
+                "record-issue",
+                "--knowledge-dir",
+                str(knowledge),
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+                "--node",
+                "video",
+                "--feedback",
+                "ending truncated",
+                "--symptom",
+                "ending incomplete",
+                "--root-cause",
+                "audio too long",
+                "--solution",
+                "shorten audio",
+                "--prevention-rule",
+                "check audio duration",
+                "--validation-method",
+                "review V02 transcript",
+                "--validation-expected",
+                "ending complete",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=child_environment,
+        )
+        issue_id = json.loads(Path(issue_result.stdout.strip()).read_text(encoding="utf-8"))["issue_id"]
+        subprocess.run(
+            [
+                sys.executable,
+                str(workflow_script),
+                "start-rerun",
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+            ],
+            check=True,
+            capture_output=True,
+            env=child_environment,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(workflow_script),
+                "validate-learning",
+                "--knowledge-dir",
+                str(knowledge),
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+                "--issue-id",
+                issue_id,
+                "--result",
+                "failed",
+            ],
+            check=True,
+            capture_output=True,
+            env=child_environment,
+        )
+        node_result = subprocess.run(
+            [
+                sys.executable,
+                str(workflow_script),
+                "prepare-node-rules",
+                "--knowledge-dir",
+                str(knowledge),
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+                "--node",
+                "video",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=child_environment,
+        )
+        assert json.loads(Path(node_result.stdout.strip()).read_text(encoding="utf-8"))["rules"] == []
         payload = Path(temporary) / "payload.json"
         payload.write_text(
             json.dumps(
@@ -48,8 +165,6 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
-        child_environment = dict(os.environ)
-        child_environment["PYTHONUTF8"] = "1"
         result = subprocess.run(
             [sys.executable, str(SKILL_ROOT / "scripts" / "autodl_h3.py"), "submit", "--payload", str(payload), "--dry-run"],
             check=True,

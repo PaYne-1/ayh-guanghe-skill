@@ -51,6 +51,8 @@ def test_skill_package_contains_required_portable_resources():
         "references/autodl-h3.md",
         "references/review-learning.md",
         "references/install.md",
+        "references/image-generation-routing.md",
+        "references/automatic-learning-rules.md",
         "requirements.txt",
         "scripts/workflow_cli.py",
         "scripts/autodl_h3.py",
@@ -63,6 +65,21 @@ def test_skill_package_contains_required_portable_resources():
         if path.is_file()
     }
     assert required <= present
+
+
+def test_image_generation_routing_is_fixed_and_cross_agent_safe():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(encoding="utf-8")
+
+    assert "references/image-generation-routing.md" in skill
+    assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" in routing
+    assert "不得调用当前智能体自身的原生生图能力" in routing
+    assert "2160×3840" in routing
+    assert "SHA-256" in routing
+    assert "不得跳级" in routing
+    assert "不得要求用户提供账号密码" in routing
+    assert "dry-run" in routing
+    assert "第三个候选仍不合格" in routing
 
 
 def test_clean_first_level_and_work_file_rules_are_documented():
@@ -83,7 +100,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件/验收记录/自动验收报告.md" in review
     assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
     assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.3.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.4.0"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -101,7 +118,22 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "自动验收" in review and "不能" in review and "最终晋升" in review
     assert "_工作文件/生成过程/标题.txt" in contract
     assert "_工作文件/生成过程/发布正文.md" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.3.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.4.0"
+
+
+def test_automatic_learning_reference_is_complete_and_routed():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    learning = (SKILL_ROOT / "references" / "automatic-learning-rules.md").read_text(
+        encoding="utf-8"
+    )
+    assert "references/automatic-learning-rules.md" in skill
+    assert "用户反馈 → 自动复盘 → V02验证 → 自动升级正式规则 → 下次任务强制加载并执行" in learning
+    assert "record-issue" in learning
+    assert "validate-learning" in learning
+    assert "prepare-node-rules" in learning
+    assert "start-rerun" in learning
+    assert "failed" in learning and "inconclusive" in learning
+    assert "自动模式只读取正式规则" in learning
 
 
 def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp_path):
@@ -966,6 +998,494 @@ def test_record_review_writes_item_evidence_to_work_dir(tmp_path):
     assert not (item / "人工验收结果.md").exists()
 
 
+def test_failed_learning_review_writes_structured_candidate_experience(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260829_批次001"
+    item = batch / "V001_卖点_封面"
+    item.mkdir(parents=True)
+    runtime.atomic_write_json(
+        batch / "启动确认单.json",
+        {"run_mode": "learning", "product_name": "产品甲"},
+    )
+    result = tmp_path / "result.json"
+    runtime.atomic_write_json(
+        result,
+        {
+            "items": [
+                {
+                    "video_id": "V001",
+                    "decision": "failed",
+                    "reason": "轮椅扶手结构错误",
+                    "suggestion": "锁定左右扶手结构",
+                    "node": "storyboard",
+                }
+            ]
+        },
+    )
+
+    runtime.record_review(batch, result, tmp_path / "knowledge")
+
+    candidates = list((tmp_path / "knowledge" / "候选经验").glob("*.json"))
+    assert len(candidates) == 1
+    candidate = json.loads(candidates[0].read_text(encoding="utf-8"))
+    assert candidate["status"] == "candidate"
+    assert candidate["user_feedback"] == "轮椅扶手结构错误"
+    assert candidate["root_cause"] == "未知，待 V02 验证"
+    assert candidate["prevention_rule"] == "锁定左右扶手结构"
+    assert candidate["validation"]["result"] == "pending"
+
+
+def test_capture_learning_issue_preserves_feedback_and_structured_review(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "20260829_批次001"
+    batch.mkdir()
+    (batch / "启动确认单.json").write_text(
+        json.dumps(
+            {
+                "run_mode": "learning",
+                "product_name": "轻便侠",
+                "product_dir": str(tmp_path / "轻便侠"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate.png"
+    candidate.write_bytes(b"candidate")
+
+    path = runtime.capture_learning_issue(
+        knowledge_dir=tmp_path / "knowledge",
+        batch_dir=batch,
+        video_id="V001",
+        node="storyboard",
+        user_feedback="轮椅扶手结构画错了",
+        symptom="右侧扶手缺失",
+        root_cause="参考图约束没有写入保持项",
+        solution="在提示词保持项中锁定左右扶手",
+        prevention_rule="提交生图前检查保持项包含左右扶手",
+        validation_method="V02 左右扶手均存在且用户通过",
+        validation_expected="左右扶手结构与主参考图一致",
+        evidence_paths=(candidate,),
+        model="Codex ImageGen",
+        channel="本机 Codex 界面",
+    )
+
+    value = json.loads(path.read_text(encoding="utf-8"))
+    assert value["status"] == "candidate"
+    assert value["user_feedback"] == "轮椅扶手结构画错了"
+    assert value["validation"]["result"] == "pending"
+    assert value["evidence"][0]["sha256"] == runtime._sha256_file(candidate)
+
+
+def test_capture_learning_issue_rejects_auto_mode(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"run_mode": "auto", "product_name": "轻便侠"}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="学习模式"):
+        runtime.capture_learning_issue(
+            knowledge_dir=tmp_path / "knowledge",
+            batch_dir=batch,
+            video_id="V001",
+            node="video",
+            user_feedback="问题",
+            symptom="表现",
+            root_cause="未知，待验证",
+            solution="方案",
+            prevention_rule="规则",
+            validation_method="方法",
+            validation_expected="结果",
+        )
+
+
+def test_capture_learning_issue_deduplicates_concurrent_feedback(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    runtime.atomic_write_json(
+        batch / "启动确认单.json",
+        {"run_mode": "learning", "product_name": "轻便侠"},
+    )
+
+    def capture(_):
+        return runtime.capture_learning_issue(
+            knowledge_dir=tmp_path / "knowledge",
+            batch_dir=batch,
+            video_id="V001",
+            node="video",
+            user_feedback="尾句被截断",
+            symptom="结尾不完整",
+            root_cause="口播超时",
+            solution="缩短口播",
+            prevention_rule="提交前检查口播长度",
+            validation_method="核对 V02 转写",
+            validation_expected="尾句完整",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(capture, range(12)))
+
+    value = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert len(set(paths)) == 1
+    assert len(value["duplicate_events"]) == 11
+
+
+def _learning_validation_fixture(runtime, tmp_path, issue_id="issue_a", prevention_rule="提交前检查口播在14秒内结束"):
+    knowledge = tmp_path / "knowledge"
+    batch = tmp_path / "batch"
+    batch.mkdir(parents=True, exist_ok=True)
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"run_mode": "learning"}), encoding="utf-8"
+    )
+    item = batch / "V001_卖点_待生成"
+    runtime.ensure_work_dirs(item)
+    runtime.atomic_write_json(
+        runtime.work_path(item, "任务状态", "任务信息.json"),
+        {"video_id": "V001", "retry_count": 1},
+    )
+    approved = runtime.work_path(item, "生成过程", f"{issue_id}.mp4")
+    approved.write_bytes(f"verified-{issue_id}".encode())
+    issue = knowledge / "候选经验" / f"{issue_id}.json"
+    runtime.atomic_write_json(
+        issue,
+        {
+            "issue_id": issue_id,
+            "status": "candidate",
+            "scope": {
+                "product_id": "p1",
+                "node": "video",
+                "model": "H3",
+                "channel": "AutoDL",
+            },
+            "user_feedback": "尾句被截断",
+            "symptom": "结尾听不完整",
+            "root_cause": "口播超时",
+            "solution": "缩短口播",
+            "prevention_rule": prevention_rule,
+            "validation": {
+                "method": "V02转写完整",
+                "expected": "尾句完整",
+                "result": "pending",
+            },
+            "source_batch": str(batch.resolve()),
+            "source_video_id": "V001",
+            "created_at": "2026-08-29T00:00:00+08:00",
+        },
+    )
+    return knowledge, batch, approved, issue
+
+
+def test_validate_learning_issue_promotes_only_verified_v02(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    knowledge, batch, approved, issue = _learning_validation_fixture(runtime, tmp_path)
+
+    rule_path = runtime.validate_learning_issue(
+        knowledge_dir=knowledge,
+        batch_dir=batch,
+        video_id="V001",
+        issue_id="issue_a",
+        result="passed",
+        verified_candidate=approved,
+    )
+
+    rule = json.loads(rule_path.read_text(encoding="utf-8"))
+    assert rule["status"] == "active"
+    assert rule["required_action"] == "提交前检查口播在14秒内结束"
+    assert rule["verified_candidate_sha256"] == runtime._sha256_file(approved)
+    assert json.loads(issue.read_text(encoding="utf-8"))["status"] == "promoted"
+
+
+@pytest.mark.parametrize("result", ["failed", "inconclusive"])
+def test_validate_learning_issue_does_not_promote_unverified_results(tmp_path, result):
+    runtime = load_script("workflow_cli.py")
+    knowledge, batch, _, issue = _learning_validation_fixture(runtime, tmp_path)
+
+    promoted = runtime.validate_learning_issue(
+        knowledge_dir=knowledge,
+        batch_dir=batch,
+        video_id="V001",
+        issue_id="issue_a",
+        result=result,
+        verified_candidate=None,
+    )
+
+    assert promoted is None
+    assert not list((knowledge / "正式规则").glob("*.json"))
+    value = json.loads(issue.read_text(encoding="utf-8"))
+    assert value["status"] == result
+    assert value["validation"]["result"] == result
+
+
+def test_new_verified_rule_supersedes_conflicting_scope(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    knowledge, batch, first_candidate, _ = _learning_validation_fixture(
+        runtime, tmp_path, issue_id="issue_first", prevention_rule="动作一"
+    )
+    first_path = runtime.validate_learning_issue(
+        knowledge_dir=knowledge,
+        batch_dir=batch,
+        video_id="V001",
+        issue_id="issue_first",
+        result="passed",
+        verified_candidate=first_candidate,
+    )
+    _, _, second_candidate, _ = _learning_validation_fixture(
+        runtime, tmp_path, issue_id="issue_second", prevention_rule="动作二"
+    )
+
+    second_path = runtime.validate_learning_issue(
+        knowledge_dir=knowledge,
+        batch_dir=batch,
+        video_id="V001",
+        issue_id="issue_second",
+        result="passed",
+        verified_candidate=second_candidate,
+    )
+
+    first = json.loads(first_path.read_text(encoding="utf-8"))
+    second = json.loads(second_path.read_text(encoding="utf-8"))
+    assert first["status"] == "superseded"
+    assert first["superseded_by"] == second["rule_id"]
+    assert second["status"] == "active"
+    assert second["version"] == 2
+
+
+def test_concurrent_learning_promotions_keep_one_active_rule(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    prepared = []
+    for index in range(12):
+        issue_id = f"issue_{index:02d}"
+        knowledge, batch, candidate, _ = _learning_validation_fixture(
+            runtime, tmp_path, issue_id=issue_id, prevention_rule=f"动作{index:02d}"
+        )
+        prepared.append((issue_id, candidate))
+
+    def promote(values):
+        issue_id, candidate = values
+        return runtime.validate_learning_issue(
+            knowledge_dir=knowledge,
+            batch_dir=batch,
+            video_id="V001",
+            issue_id=issue_id,
+            result="passed",
+            verified_candidate=candidate,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(promote, prepared))
+
+    rules = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (knowledge / "正式规则").glob("*.json")
+    ]
+    assert sum(rule["status"] == "active" for rule in rules) == 1
+    assert {rule["version"] for rule in rules} == set(range(1, 13))
+
+
+def _write_learning_rule(runtime, rules_dir, rule_id, scope, action, verified_at):
+    runtime.atomic_write_json(
+        rules_dir / f"{rule_id}.json",
+        {
+            "rule_id": rule_id,
+            "version": 1,
+            "status": "active",
+            "scope": scope,
+            "trigger": "测试触发条件",
+            "required_action": action,
+            "validation_check": "测试检查",
+            "verified_at": verified_at,
+            "hit_count": 0,
+            "last_hit_at": None,
+        },
+    )
+
+
+def test_load_matching_rules_prefers_product_and_precise_scope(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    rules = tmp_path / "正式规则"
+    _write_learning_rule(
+        runtime,
+        rules,
+        "global",
+        {"product_id": None, "node": "video", "model": None, "channel": None},
+        "全局动作",
+        "2026-08-28T00:00:00+08:00",
+    )
+    _write_learning_rule(
+        runtime,
+        rules,
+        "product",
+        {"product_id": "p1", "node": "video", "model": "H3", "channel": "AutoDL"},
+        "产品动作",
+        "2026-08-29T00:00:00+08:00",
+    )
+
+    matched = runtime.load_matching_rules(
+        tmp_path, product_id="p1", node="video", model="H3", channel="AutoDL"
+    )
+
+    assert [rule["rule_id"] for rule in matched] == ["product", "global"]
+
+
+def test_initialize_batch_records_matching_formal_rules(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    product = tmp_path / "产品甲"
+    product.mkdir()
+    Image.new("RGB", (64, 64), "white").save(product / "产品.png")
+    covers = tmp_path / "封面参考"
+    covers.mkdir()
+    Image.new("RGB", (64, 64), "navy").save(covers / "参考.png")
+    knowledge = tmp_path / "knowledge"
+    product_id = runtime._product_id("产品甲")
+    _write_learning_rule(
+        runtime,
+        knowledge / "正式规则",
+        "product-rule",
+        {"product_id": product_id, "node": "storyboard", "model": None, "channel": None},
+        "提交前锁定产品结构",
+        "2026-08-29T00:00:00+08:00",
+    )
+
+    context = runtime.initialize_batch(
+        product_dir=product,
+        product_name="产品甲",
+        selling_points=("轻便",),
+        total_videos=1,
+        run_mode="learning",
+        resolution="768P",
+        max_budget_yuan="20",
+        cover_reference_dir=covers,
+        knowledge_dir=knowledge,
+        now=datetime(2026, 8, 29, 12, 0, 0),
+    )
+
+    confirmation = json.loads((context.batch_dir / "启动确认单.json").read_text(encoding="utf-8"))
+    assert confirmation["formal_rules_library"] == str((knowledge / "正式规则").resolve())
+    assert confirmation["matched_learning_rules"][0]["rule_id"] == "product-rule"
+
+
+def test_prepare_node_rules_records_hits_without_lost_updates(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    knowledge = tmp_path / "knowledge"
+    _write_learning_rule(
+        runtime,
+        knowledge / "正式规则",
+        "rule-hit",
+        {"product_id": "p1", "node": "video", "model": "H3", "channel": "AutoDL"},
+        "提交前检查完整口播",
+        "2026-08-29T00:00:00+08:00",
+    )
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    runtime.atomic_write_json(
+        batch / "启动确认单.json",
+        {"product_name": "产品甲", "product_id": "p1", "run_mode": "learning"},
+    )
+    item = batch / "V001_卖点_待生成"
+    runtime.ensure_work_dirs(item)
+
+    def prepare(_):
+        return runtime.prepare_node_rules(
+            knowledge_dir=knowledge,
+            batch_dir=batch,
+            video_id="V001",
+            node="video",
+            model="H3",
+            channel="AutoDL",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(prepare, range(12)))
+
+    manifest = json.loads(paths[0].read_text(encoding="utf-8"))
+    rule = json.loads((knowledge / "正式规则" / "rule-hit.json").read_text(encoding="utf-8"))
+    assert manifest["rules"][0]["required_action"] == "提交前检查完整口播"
+    assert rule["hit_count"] == 12
+    assert rule["last_hit_at"]
+
+
+def test_learning_cli_commands_are_exposed():
+    environment = dict(os.environ, PYTHONUTF8="1")
+    result = subprocess.run(
+        [sys.executable, str(SKILL_ROOT / "scripts" / "workflow_cli.py"), "--help"],
+        capture_output=True,
+        env=environment,
+    )
+    assert result.returncode == 0
+    stdout = result.stdout.decode(errors="replace")
+    assert "record-issue" in stdout
+    assert "validate-learning" in stdout
+    assert "prepare-node-rules" in stdout
+    assert "start-rerun" in stdout
+
+
+def test_record_issue_cli_writes_candidate(tmp_path):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"run_mode": "learning", "product_name": "产品甲"}), encoding="utf-8"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "workflow_cli.py"),
+            "record-issue",
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+            "--batch",
+            str(batch),
+            "--video-id",
+            "V001",
+            "--node",
+            "video",
+            "--feedback",
+            "尾句截断",
+            "--symptom",
+            "结尾不完整",
+            "--root-cause",
+            "口播超时",
+            "--solution",
+            "缩短口播",
+            "--prevention-rule",
+            "提交前检查口播长度",
+            "--validation-method",
+            "核对V02转写",
+            "--validation-expected",
+            "尾句完整",
+        ],
+        capture_output=True,
+        env=dict(os.environ, PYTHONUTF8="1"),
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    output = Path(result.stdout.decode("utf-8").strip())
+    assert output.is_file()
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "candidate"
+
+
+def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    item = batch / "V001_卖点_待生成"
+    runtime.ensure_work_dirs(item)
+    task = {"video_id": "V001", "retry_count": 0, "status": "REVIEW_FAILED"}
+    runtime.atomic_write_json(runtime.work_path(item, "任务状态", "任务信息.json"), task)
+    runtime.atomic_write_json(batch / "批次任务表.json", {"items": [task]})
+
+    task_path = runtime.start_rerun(batch, "V001")
+
+    updated = json.loads(task_path.read_text(encoding="utf-8"))
+    table = json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))
+    assert updated["retry_count"] == 1
+    assert updated["status"] == "V02_READY"
+    assert table["items"][0]["retry_count"] == 1
+    assert runtime.work_path(item, "历史版本", "视频版本/V02_唯一一次重跑").is_dir()
+    with pytest.raises(ValueError, match="V02"):
+        runtime.start_rerun(batch, "V001")
+
+
 def test_self_test_is_windows_encoding_safe():
     environment = dict(os.environ)
     environment.pop("PYTHONUTF8", None)
@@ -976,6 +1496,16 @@ def test_self_test_is_windows_encoding_safe():
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_self_test_covers_learning_resources_and_commands():
+    text = (SKILL_ROOT / "scripts" / "self_test.py").read_text(encoding="utf-8")
+    assert "references/automatic-learning-rules.md" in text
+    assert "references/image-generation-routing.md" in text
+    assert "record-issue" in text
+    assert "validate-learning" in text
+    assert "prepare-node-rules" in text
+    assert "start-rerun" in text
 
 
 def test_cover_cli_accepts_utf8_title_file(tmp_path):
