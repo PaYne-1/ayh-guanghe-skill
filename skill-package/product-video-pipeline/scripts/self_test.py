@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -210,6 +211,41 @@ def main() -> int:
         assert rejected.returncode == 2
         assert "first_frame" in rejected.stderr
         assert "last_frame" in rejected.stderr
+    workflow_spec = importlib.util.spec_from_file_location("workflow_cli", workflow_script)
+    assert workflow_spec and workflow_spec.loader
+    workflow_module = importlib.util.module_from_spec(workflow_spec)
+    workflow_spec.loader.exec_module(workflow_module)
+    profile = json.loads(
+        (SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json").read_text(encoding="utf-8")
+    )
+    single_person_content = {
+        "publish_title": "老人出门代步为什么要选电动轮椅",
+        "cover_title": "出门更轻松",
+        "people": [
+            {
+                "id": "P1",
+                "identity": "老人",
+                "gender": "女",
+                "age_feel": "70岁左右",
+                "position": "坐在轮椅上",
+                "action": "缓慢前行",
+                "speaks": True,
+            }
+        ],
+        "storyboard_people": ["P1"],
+        "script_segments": [
+            {"start": 0, "end": 4, "speaker_id": "P1", "dialogue": "开场"},
+            {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "回答"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以立即下单购买"},
+        ],
+        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
+        "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善，内容真实克制，并提醒有需要的家庭按实际情况选择。",
+        "hashtags": profile["fixed_hashtags"],
+    }
+    content_issues = workflow_module.validate_content_package(single_person_content, profile)
+    assert "people.exactly_two_required" in content_issues
+    assert "script.exactly_two_speakers_required" in content_issues
+    assert "content.tail_frame_prompt_missing" in content_issues
     required_phrases = {
         "SKILL.md": ("minimax_h3_lightx2v", "合理尾帧", "每条项目固定"),
         "references/workflow.md": ("first_frame", "last_frame", "固定使用"),
