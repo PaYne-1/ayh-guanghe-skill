@@ -24,7 +24,6 @@ WORKFLOW_ID = "minimax_h3_lightx2v_v5_15s"
 KNOWN_WORKFLOW_IDS = (
     WORKFLOW_ID,
     "minimax_h3_lightx2v",
-    "minimax_h3_image_audio_to_video_v2_15s",
 )
 QUERY_URL_TEMPLATE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow/result/{task_id}"
 
@@ -49,6 +48,22 @@ def _authorization(api_key: str, auth_scheme: str) -> str:
     if auth_scheme == "bearer":
         return f"Bearer {api_key}"
     raise ValueError("auth_scheme 只能是 bearer 或 raw")
+
+
+def validate_first_last_payload(payload: Dict[str, object]) -> None:
+    required = ("prompt", "duration", "resolution", "first_frame", "last_frame")
+    missing = [field for field in required if not payload.get(field)]
+    if missing:
+        raise ValueError("首尾帧 payload 缺少字段：" + ", ".join(missing))
+    if payload["duration"] != 15:
+        raise ValueError("首尾帧视频 duration 必须为 15")
+    if payload["first_frame"] == payload["last_frame"]:
+        raise ValueError("last_frame 必须独立生成，不得复用 first_frame")
+    prompt = str(payload["prompt"])
+    required_rules = ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+    missing_rules = [rule for rule in required_rules if rule not in prompt]
+    if missing_rules:
+        raise ValueError("prompt 缺少全程规则：" + ", ".join(missing_rules))
 
 
 def _json_request(
@@ -93,6 +108,7 @@ def submit_payload(
         raise ValueError("提交 payload 必须是 JSON 对象")
     if workflow_id not in KNOWN_WORKFLOW_IDS:
         raise ValueError(f"不支持的工作流 ID：{workflow_id}")
+    validate_first_last_payload(payload)
     submit_url = f"{COMFYUI_WORKFLOW_BASE}/{workflow_id}"
     preview = {
         "dry_run": dry_run,
