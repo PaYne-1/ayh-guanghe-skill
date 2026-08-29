@@ -236,16 +236,47 @@ def main() -> int:
         "script_segments": [
             {"start": 0, "end": 4, "speaker_id": "P1", "dialogue": "开场"},
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "回答"},
-            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以立即下单购买"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以选择"},
         ],
         "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
-        "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善，内容真实克制，并提醒有需要的家庭按实际情况选择。",
+        "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善。画面保持真实自然，两人始终同框，轮椅结构清楚完整，内容表达克制，不夸大产品效果，也不虚构价格参数，并提醒有需要的家庭结合实际情况认真选择。",
         "hashtags": profile["fixed_hashtags"],
     }
     content_issues = workflow_module.validate_content_package(single_person_content, profile)
     assert "people.exactly_two_required" in content_issues
     assert "script.exactly_two_speakers_required" in content_issues
     assert "content.tail_frame_prompt_missing" in content_issues
+    incomplete_prompt_content = dict(single_person_content)
+    incomplete_prompt_content["video_prompt"] = "一镜到底，连续平稳运镜"
+    assert "shot.full_duration_rules_missing" in workflow_module.validate_content_package(
+        incomplete_prompt_content, profile
+    )
+    valid_content = json.loads(json.dumps(single_person_content, ensure_ascii=False))
+    valid_content["people"].append(
+        {
+            "id": "P2",
+            "identity": "家属",
+            "gender": "男",
+            "age_feel": "40岁左右",
+            "position": "轮椅旁",
+            "action": "陪同步行",
+            "speaks": True,
+        }
+    )
+    valid_content["storyboard_people"] = ["P1", "P2"]
+    valid_content["script_segments"][0]["speaker_id"] = "P2"
+    valid_content["storyboard_prompt"] = "竖屏4K，2160×3840，9:16，老人和家属陪同直线行驶"
+    valid_content["last_frame_prompt"] = "同尺寸合理尾帧，主体继续前进1至1.5米"
+    with tempfile.TemporaryDirectory() as content_temporary:
+        content_root = Path(content_temporary)
+        content_path = content_root / "content.json"
+        content_path.write_text(json.dumps(valid_content, ensure_ascii=False), encoding="utf-8")
+        workflow_module.save_content_package(
+            content_root / "item",
+            content_path,
+            SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json",
+        )
+        assert (content_root / "item" / "_工作文件" / "生成过程" / "合理尾帧提示词.txt").is_file()
     required_phrases = {
         "SKILL.md": ("minimax_h3_lightx2v", "合理尾帧", "每条项目固定"),
         "references/workflow.md": ("first_frame", "last_frame", "固定使用"),

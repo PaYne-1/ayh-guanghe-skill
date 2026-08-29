@@ -1249,6 +1249,8 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
     if not people or any(not required_person_fields <= set(person) for person in people if isinstance(person, dict)):
         issues.append("people.fields_missing")
     people_ids = [str(person.get("id")) for person in people if isinstance(person, dict)]
+    if len(people_ids) != 2 or len(set(people_ids)) != 2:
+        issues.append("people.exactly_two_required")
     storyboard_people = [str(value) for value in package.get("storyboard_people", [])]
     if people_ids != storyboard_people:
         issues.append("people.mismatch")
@@ -1259,17 +1261,29 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
         issues.append("script.timeline")
     if any(str(segment.get("speaker_id")) not in people_ids for segment in segments if isinstance(segment, dict)):
         issues.append("people.offscreen_speaker")
+    segment_speakers = {
+        str(segment.get("speaker_id")) for segment in segments if isinstance(segment, dict) and segment.get("speaker_id")
+    }
+    if len(segment_speakers) != 2 or segment_speakers != set(people_ids):
+        issues.append("script.exactly_two_speakers_required")
     closing = str(segments[-1].get("dialogue", "")) if segments and isinstance(segments[-1], dict) else ""
     if not _closing_is_valid(closing, str(profile["closing_product_name"])):
         issues.append("closing.missing_improvement_and_cta")
 
     video_prompt = str(package.get("video_prompt", ""))
+    if not str(package.get("last_frame_prompt", "")).strip():
+        issues.append("content.tail_frame_prompt_missing")
     if any(term.casefold() in video_prompt.casefold() for term in TURNING_TERMS):
         issues.append("motion.turning_forbidden")
     if any(term in video_prompt for term in FOLDING_PROCESS_TERMS):
         issues.append("folding.dynamic_process_forbidden")
     if not any(term in video_prompt for term in ("一镜到底", "固定镜头", "同一个镜头")):
         issues.append("shot.single_required")
+    if any(
+        rule not in video_prompt
+        for rule in ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+    ):
+        issues.append("shot.full_duration_rules_missing")
 
     body = str(package.get("publish_body", ""))
     body_chars = _han_count(body)
@@ -1340,6 +1354,7 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
         now,
     )
     _write_candidate_preserving_previous(item_dir, "分镜提示词.txt", str(package["storyboard_prompt"]), now)
+    _write_candidate_preserving_previous(item_dir, "合理尾帧提示词.txt", str(package["last_frame_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "视频提示词.txt", str(package["video_prompt"]), now)
     tags = " ".join(package["hashtags"])
     _write_candidate_preserving_previous(item_dir, "发布正文.md", f"{package['publish_body']}\n\n{tags}\n", now)
