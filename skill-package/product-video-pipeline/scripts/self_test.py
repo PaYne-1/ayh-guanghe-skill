@@ -46,7 +46,7 @@ def main() -> int:
         encoding="utf-8",
         env=child_environment,
     ).stdout
-    for command in ("record-issue", "validate-learning", "prepare-node-rules"):
+    for command in ("record-issue", "validate-learning", "prepare-node-rules", "start-rerun"):
         assert command in workflow_help
     with tempfile.TemporaryDirectory() as temporary:
         temporary_root = Path(temporary)
@@ -59,7 +59,7 @@ def main() -> int:
             encoding="utf-8",
         )
         (state_dir / "任务信息.json").write_text(
-            json.dumps({"video_id": "V001", "retry_count": 1}), encoding="utf-8"
+            json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
         )
         knowledge = temporary_root / "knowledge"
         issue_result = subprocess.run(
@@ -97,6 +97,20 @@ def main() -> int:
             env=child_environment,
         )
         issue_id = json.loads(Path(issue_result.stdout.strip()).read_text(encoding="utf-8"))["issue_id"]
+        subprocess.run(
+            [
+                sys.executable,
+                str(workflow_script),
+                "start-rerun",
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+            ],
+            check=True,
+            capture_output=True,
+            env=child_environment,
+        )
         subprocess.run(
             [
                 sys.executable,

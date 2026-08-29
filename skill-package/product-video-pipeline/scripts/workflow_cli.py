@@ -1387,6 +1387,34 @@ def record_task(
     atomic_write_json(table_path, table)
 
 
+def start_rerun(batch_dir: Path, video_id: str, now: Optional[datetime] = None) -> Path:
+    batch_dir = batch_dir.resolve()
+    item_dir = _find_item(batch_dir, video_id)
+    task_path = work_path(item_dir, "任务状态", "任务信息.json")
+    task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
+    if int(task.get("retry_count", 0)) != 0:
+        raise ValueError("V02 是唯一一次重跑，禁止再次创建重跑")
+    task["retry_count"] = 1
+    task["status"] = "V02_READY"
+    task["rerun_started_at"] = (now or datetime.now().astimezone()).isoformat()
+    atomic_write_json(task_path, task)
+    version_dir = work_path(item_dir, "历史版本", "视频版本/V02_唯一一次重跑")
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    table_path = batch_dir / "批次任务表.json"
+    table = read_json(table_path, {"items": []})
+    found = False
+    for row in table["items"]:
+        if row.get("video_id") == video_id:
+            row.update(task)
+            found = True
+            break
+    if not found:
+        table["items"].append(task)
+    atomic_write_json(table_path, table)
+    return task_path
+
+
 def _safe_file_url(item_dir: Path, filename: str) -> str:
     path = validated_promoted_artifact_path(item_dir, filename)
     return quote(f"{item_dir.name}/{filename}") if path is not None else ""
@@ -1627,6 +1655,10 @@ def build_parser() -> argparse.ArgumentParser:
     node_rules.add_argument("--model")
     node_rules.add_argument("--channel")
 
+    rerun = subparsers.add_parser("start-rerun", help="把失败任务切换为唯一一次 V02 重跑")
+    rerun.add_argument("--batch", type=Path, required=True)
+    rerun.add_argument("--video-id", required=True)
+
     organize = subparsers.add_parser("organize", help="安全整理单条任务目录的工作文件")
     organize_target = organize.add_mutually_exclusive_group(required=True)
     organize_target.add_argument("--item-dir", type=Path)
@@ -1725,6 +1757,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     channel=args.channel,
                 ).resolve()
             )
+        elif args.command == "start-rerun":
+            print(start_rerun(args.batch, args.video_id).resolve())
         elif args.command == "organize":
             result = (
                 organize_item_dir(args.item_dir, dry_run=args.dry_run)

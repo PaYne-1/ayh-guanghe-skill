@@ -117,6 +117,16 @@ python scripts/workflow_cli.py record-issue `
 5. V02 仍出现该问题时使用 `failed`；
 6. 视频整体通过但无法证明该问题已解决时使用 `inconclusive`。
 
+开始唯一一次重跑前，必须通过受控命令把任务从 V01 切换为 V02：
+
+```powershell
+python scripts/workflow_cli.py start-rerun `
+  --batch "批次目录" `
+  --video-id "V001"
+```
+
+该命令只允许 `retry_count` 从 `0` 变为 `1`，同时创建 `V02_唯一一次重跑` 历史目录；再次调用必须失败。不得直接修改 JSON 绕过次数限制。
+
 通过并自动升级：
 
 ```powershell

@@ -131,6 +131,7 @@ def test_automatic_learning_reference_is_complete_and_routed():
     assert "record-issue" in learning
     assert "validate-learning" in learning
     assert "prepare-node-rules" in learning
+    assert "start-rerun" in learning
     assert "failed" in learning and "inconclusive" in learning
     assert "自动模式只读取正式规则" in learning
 
@@ -1417,6 +1418,7 @@ def test_learning_cli_commands_are_exposed():
     assert "record-issue" in stdout
     assert "validate-learning" in stdout
     assert "prepare-node-rules" in stdout
+    assert "start-rerun" in stdout
 
 
 def test_record_issue_cli_writes_candidate(tmp_path):
@@ -1462,6 +1464,28 @@ def test_record_issue_cli_writes_candidate(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "candidate"
 
 
+def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    item = batch / "V001_卖点_待生成"
+    runtime.ensure_work_dirs(item)
+    task = {"video_id": "V001", "retry_count": 0, "status": "REVIEW_FAILED"}
+    runtime.atomic_write_json(runtime.work_path(item, "任务状态", "任务信息.json"), task)
+    runtime.atomic_write_json(batch / "批次任务表.json", {"items": [task]})
+
+    task_path = runtime.start_rerun(batch, "V001")
+
+    updated = json.loads(task_path.read_text(encoding="utf-8"))
+    table = json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))
+    assert updated["retry_count"] == 1
+    assert updated["status"] == "V02_READY"
+    assert table["items"][0]["retry_count"] == 1
+    assert runtime.work_path(item, "历史版本", "视频版本/V02_唯一一次重跑").is_dir()
+    with pytest.raises(ValueError, match="V02"):
+        runtime.start_rerun(batch, "V001")
+
+
 def test_self_test_is_windows_encoding_safe():
     environment = dict(os.environ)
     environment.pop("PYTHONUTF8", None)
@@ -1481,6 +1505,7 @@ def test_self_test_covers_learning_resources_and_commands():
     assert "record-issue" in text
     assert "validate-learning" in text
     assert "prepare-node-rules" in text
+    assert "start-rerun" in text
 
 
 def test_cover_cli_accepts_utf8_title_file(tmp_path):
