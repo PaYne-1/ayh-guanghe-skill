@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -100,7 +101,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件/验收记录/自动验收报告.md" in review
     assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
     assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.4.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.5.0"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -118,7 +119,23 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "自动验收" in review and "不能" in review and "最终晋升" in review
     assert "_工作文件/生成过程/标题.txt" in contract
     assert "_工作文件/生成过程/发布正文.md" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.4.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.5.0"
+
+
+def test_v1_5_release_contains_unified_first_last_frame_skill():
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.5.0.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        assert "product-video-pipeline/SKILL.md" in names
+        assert "product-video-pipeline/VERSION" in names
+        assert "product-video-pipeline/scripts/autodl_h3.py" in names
+        assert "product-video-pipeline/references/autodl-h3.md" in names
+        assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.5.0"
+        skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
+        assert "first_frame" in skill and "last_frame" in skill
+        assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
 
 
 def test_automatic_learning_reference_is_complete_and_routed():
@@ -665,7 +682,8 @@ def test_content_validator_enforces_confirmed_ayh_contract():
             {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"},
         ],
         "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",
-        "video_prompt": "一镜到底，固定镜头，轮椅沿直线缓慢前进，不要背景音乐。",
+        "last_frame_prompt": "同尺寸合理尾帧，主体继续前进约1至1.5米，产品结构和人物保持一致。",
+        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，轮椅沿直线缓慢前进，不要背景音乐。",
         "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
         "hashtags": ["#爱优护电动轮椅", "#ainsnbot高端智能电动轮椅", "#电动轮椅", "#老人专用电动轮椅"],
     }
@@ -701,7 +719,8 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
             {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"},
         ],
         "storyboard_prompt": "竖屏4K，2160×3840，9:16，两位女性始终同框。",
-        "video_prompt": "一镜到底，固定镜头，轮椅沿直线缓慢前进。",
+        "last_frame_prompt": "同尺寸合理尾帧，主体继续前进约1至1.5米。",
+        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，轮椅沿直线缓慢前进。",
         "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
         "hashtags": ["#爱优护电动轮椅", "#ainsnbot高端智能电动轮椅", "#电动轮椅", "#老人专用电动轮椅"],
     }
@@ -717,6 +736,7 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
     assert (item / "_工作文件" / "生成过程" / "发布正文.md").exists()
     assert (item / "_工作文件" / "生成过程" / "策划内容.json").exists()
     assert (item / "_工作文件" / "生成过程" / "分镜提示词.txt").exists()
+    assert (item / "_工作文件" / "生成过程" / "合理尾帧提示词.txt").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
     assert not (item / "策划内容.json").exists()
 
@@ -741,10 +761,11 @@ def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tm
     payload_path.write_text(
         json.dumps(
             {
-                "prompt": "固定镜头",
+                "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
                 "duration": 15,
                 "resolution": "768p竖",
-                "ref_image_0": "data:image/png;base64,AAAA",
+                "first_frame": "data:image/png;base64,AAAA",
+                "last_frame": "data:image/png;base64,BBBB",
             },
             ensure_ascii=False,
         ),
@@ -758,7 +779,8 @@ def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tm
     )
     assert preview["payload"]["duration"] == 15
     assert preview["payload"]["resolution"] == "768p竖"
-    assert preview["payload"]["ref_image_0"].startswith("data:image/png;base64,")
+    assert preview["payload"]["first_frame"].startswith("data:image/png;base64,")
+    assert preview["payload"]["last_frame"].startswith("data:image/png;base64,")
     assert "aigc_watermark" not in preview["payload"]
     assert "secret" not in json.dumps(preview, ensure_ascii=False)
     assert client.extract_task_id({"task_id": "root-task"}) == "root-task"
@@ -772,11 +794,11 @@ def test_autodl_client_can_preview_first_last_frame_workflow(tmp_path):
     payload_path.write_text(
         json.dumps(
             {
-                "prompt": "固定镜头，首尾画面一致",
+                "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
                 "duration": 15,
                 "resolution": "768p竖",
                 "first_frame": "data:image/png;base64,AAAA",
-                "last_frame": "data:image/png;base64,AAAA",
+                "last_frame": "data:image/png;base64,BBBB",
             },
             ensure_ascii=False,
         ),
@@ -791,10 +813,10 @@ def test_autodl_client_can_preview_first_last_frame_workflow(tmp_path):
     )
 
     assert preview["url"].endswith("/minimax_h3_lightx2v")
-    assert preview["payload"]["first_frame"] == preview["payload"]["last_frame"]
+    assert preview["payload"]["first_frame"] != preview["payload"]["last_frame"]
 
 
-def test_autodl_client_can_preview_multi_image_audio_workflow(tmp_path):
+def test_autodl_client_rejects_legacy_multi_image_audio_workflow(tmp_path):
     client = load_script("autodl_h3.py")
     payload_path = tmp_path / "multi-image-audio.json"
     payload_path.write_text(
@@ -811,15 +833,13 @@ def test_autodl_client_can_preview_multi_image_audio_workflow(tmp_path):
         encoding="utf-8",
     )
 
-    preview = client.submit_payload(
-        payload_path,
-        api_key="secret",
-        dry_run=True,
-        workflow_id="minimax_h3_image_audio_to_video_v2_15s",
-    )
-
-    assert preview["url"].endswith("/minimax_h3_image_audio_to_video_v2_15s")
-    assert preview["payload"]["ref_audio_0"].startswith("data:audio/wav;base64,")
+    with pytest.raises(ValueError, match="不支持的工作流 ID"):
+        client.submit_payload(
+            payload_path,
+            api_key="secret",
+            dry_run=True,
+            workflow_id="minimax_h3_image_audio_to_video_v2_15s",
+        )
 
 
 def test_autodl_reference_uses_current_comfyui_workflow():
@@ -827,11 +847,10 @@ def test_autodl_reference_uses_current_comfyui_workflow():
     assert "minimax_h3_lightx2v_v5_15s" in text
     assert "minimax_h3_lightx2v" in text
     assert "/api/v1/minimax/v2/video_generation" not in text
-    assert "ref_image_0" in text
     assert "first_frame" in text
     assert "last_frame" in text
     assert "minimax_h3_image_audio_to_video_v2_15s" in text
-    assert "ref_audio_0" in text
+    assert "不得用于新任务、V01 或 V02 提交" in text
 
 
 def test_workflow_requires_video_to_match_accepted_storyboard_visuals():
@@ -853,7 +872,7 @@ def test_rules_require_single_shot_smooth_camera_and_complete_narration():
     assert "自动精简" in contract
     assert "尾句被截断" in review
     assert "自动判为不合格" in review
-    assert "完整说完全部口播" in wheelchair
+    assert "全部台词按自然聊天语速在 15 秒内完整说完" in wheelchair
 
 
 def test_first_last_frame_workflow_applies_core_rules_for_full_duration():
@@ -861,22 +880,22 @@ def test_first_last_frame_workflow_applies_core_rules_for_full_duration():
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
     assert "整个0–15秒" in workflow
-    assert "整个0–15秒" in autodl
-    assert "一镜到底、连续平稳运镜、完整口播" in autodl
-    assert "不得只约束首帧和尾帧" in autodl
+    assert "整个 0–15 秒" in autodl
+    assert "一镜到底、连续平稳运镜、完整双人对话口播" in autodl
+    assert "首尾帧只加强端点约束" in autodl
 
 
-def test_new_videos_generate_and_validate_audio_before_video():
+def test_new_videos_use_fixed_first_last_frames_and_native_dialogue():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "先生成独立口播音轨" in skill
-    assert "音轨生成费用" in startup
-    assert "14秒内" in workflow
-    assert "新视频不得依赖上一版音轨" in autodl
-    assert "minimax_h3_image_audio_to_video_v2_15s" in skill
+    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
+    assert "行驶双人对话合理尾帧模式：固定启用" in startup
+    assert "生成原生双角色对话" in workflow
+    assert "模型原生双角色对话音轨" in autodl
+    assert "minimax_h3_image_audio_to_video_v2_15s" not in skill
 
 
 def test_dialogue_scripts_require_distinct_speakers_without_user_listening_gate():
@@ -885,21 +904,21 @@ def test_dialogue_scripts_require_distinct_speakers_without_user_listening_gate(
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
-    assert "对话式脚本" in workflow
-    assert "每个不同 `speaker_id` 必须使用可区分的独立人物音色" in workflow
-    assert "系统自动验收，不设置用户试听确认节点" in workflow
-    assert "两个或以上不同的 `speaker_id`" in contract
+    assert "每条脚本必须恰好包含" in workflow
+    assert "两个不同的 `speaker_id`" in workflow
+    assert "成片必须逐句核验" in workflow
+    assert "必须恰好是两个一致且不同的 ID" in contract
     assert "老人自问自答" in review
     assert "角色身份不得固定为女儿" in wheelchair
 
 
-def test_driving_dialogue_prefers_reasonable_4k_tail_first_last_workflow():
+def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "行驶双人对话场景" in skill
-    assert "优先使用 `minimax_h3_lightx2v`" in skill
+    assert "每条项目固定为轮椅真实向前行驶" in skill
+    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
     assert "2160×3840" in workflow
     assert "约 1–1.5 米" in workflow
     assert "尾帧不得复用首帧" in autodl
