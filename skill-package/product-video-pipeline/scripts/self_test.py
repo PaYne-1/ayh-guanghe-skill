@@ -156,10 +156,11 @@ def main() -> int:
         payload.write_text(
             json.dumps(
                 {
-                    "prompt": "固定镜头",
+                    "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
                     "duration": 15,
                     "resolution": "768p竖",
-                    "ref_image_0": "data:image/png;base64,AAAA",
+                    "first_frame": "data:image/png;base64,AAAA",
+                    "last_frame": "data:image/png;base64,BBBB",
                 },
                 ensure_ascii=False,
             ),
@@ -178,6 +179,62 @@ def main() -> int:
         assert preview["url"].endswith("/minimax_h3_lightx2v_v5_15s")
         assert preview["payload"]["resolution"] == "768p竖"
         assert "aigc_watermark" not in preview["payload"]
+        legacy_payload = Path(temporary) / "legacy-payload.json"
+        legacy_payload.write_text(
+            json.dumps(
+                {
+                    "prompt": "固定镜头",
+                    "duration": 15,
+                    "resolution": "768p竖",
+                    "ref_image_0": "data:image/png;base64,AAAA",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        rejected = subprocess.run(
+            [
+                sys.executable,
+                str(SKILL_ROOT / "scripts" / "autodl_h3.py"),
+                "submit",
+                "--payload",
+                str(legacy_payload),
+                "--dry-run",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=child_environment,
+        )
+        assert rejected.returncode == 2
+        assert "first_frame" in rejected.stderr
+        assert "last_frame" in rejected.stderr
+    required_phrases = {
+        "SKILL.md": ("minimax_h3_lightx2v", "合理尾帧", "每条项目固定"),
+        "references/workflow.md": ("first_frame", "last_frame", "固定使用"),
+        "references/startup-checklist.md": ("固定启用", "minimax_h3_lightx2v"),
+        "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
+        "references/content-contract.md": ("双人对话", "合理尾帧"),
+    }
+    for relative_path, phrases in required_phrases.items():
+        content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
+        for phrase in phrases:
+            assert phrase in content, f"{relative_path} 缺少统一首尾帧规则：{phrase}"
+    forbidden_phrases = (
+        "其他场景继续使用已确认的现有工作流",
+        "是否命中行驶双人对话合理尾帧模式：是 / 否",
+        "合理尾帧首尾帧视频预计费用（命中时）",
+        "新视频默认使用 `minimax_h3_image_audio_to_video_v2_15s`",
+    )
+    maintained_documents = ("SKILL.md",) + tuple(
+        str(path.relative_to(SKILL_ROOT)).replace("\\", "/")
+        for path in (SKILL_ROOT / "references").glob("*.md")
+    )
+    for relative_path in maintained_documents:
+        content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in content, f"{relative_path} 仍包含旧条件分支：{phrase}"
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 
