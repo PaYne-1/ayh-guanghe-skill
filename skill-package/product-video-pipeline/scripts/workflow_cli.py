@@ -59,7 +59,15 @@ IMPROVEMENT_TERMS = (
     "愿意下楼",
     "不用总麻烦",
 )
-DELIVERABLE_NAMES = {"视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"}
+DELIVERABLE_NAMES = {
+    "视频.mp4",
+    "封面图.png",
+    "发布正文.txt",
+    "话题标签.txt",
+    "标题.txt",
+    "分镜图.png",
+    "尾帧图.png",
+}
 WORK_DIR_NAME = "_工作文件"
 WORK_CATEGORIES = ("任务状态", "生成过程", "验收记录", "历史版本")
 TASK_STATE_PREFIXES = (
@@ -372,7 +380,7 @@ def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
     item_dir = item_dir.resolve()
     artifact_name = str(event.get("artifact_name", ""))
     if artifact_name not in DELIVERABLE_NAMES or event.get("decision") != "passed":
-        raise ValueError("只有五项固定产出的 passed 事件可以晋升")
+        raise ValueError("只有七项固定产出的 passed 事件可以晋升")
     events = load_approval_events(item_dir)
     recorded = next((value for value in events if value.get("event_id") == event.get("event_id")), None)
     if recorded is None:
@@ -546,6 +554,8 @@ def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Opti
 def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
     if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME:
         return None
+    if path.name == "发布正文.md":
+        return "历史版本", Path("旧格式") / path.name
     if path.name in HISTORY_DIR_NAMES:
         return "历史版本", Path(path.name)
     if path.name.startswith(TASK_STATE_PREFIXES):
@@ -1356,8 +1366,8 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     _write_candidate_preserving_previous(item_dir, "分镜提示词.txt", str(package["storyboard_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "合理尾帧提示词.txt", str(package["last_frame_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "视频提示词.txt", str(package["video_prompt"]), now)
-    tags = " ".join(package["hashtags"])
-    _write_candidate_preserving_previous(item_dir, "发布正文.md", f"{package['publish_body']}\n\n{tags}\n", now)
+    _write_candidate_preserving_previous(item_dir, "发布正文.txt", f"{package['publish_body']}\n", now)
+    _write_candidate_preserving_previous(item_dir, "话题标签.txt", " ".join(package["hashtags"]) + "\n", now)
 
 
 def _find_item(batch_dir: Path, video_id: str) -> Path:
