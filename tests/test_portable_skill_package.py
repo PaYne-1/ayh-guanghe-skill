@@ -147,6 +147,29 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
 
 
+def test_v1_6_release_contains_seven_root_deliverables():
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.6.0.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        assert "product-video-pipeline/SKILL.md" in names
+        assert "product-video-pipeline/VERSION" in names
+        assert "product-video-pipeline/scripts/workflow_cli.py" in names
+        assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.6.0"
+        skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
+        for artifact in (
+            "标题.txt",
+            "发布正文.txt",
+            "话题标签.txt",
+            "分镜图.png",
+            "尾帧图.png",
+            "封面图.png",
+            "视频.mp4",
+        ):
+            assert artifact in skill
+
+
 def test_automatic_learning_reference_is_complete_and_routed():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     learning = (SKILL_ROOT / "references" / "automatic-learning-rules.md").read_text(
