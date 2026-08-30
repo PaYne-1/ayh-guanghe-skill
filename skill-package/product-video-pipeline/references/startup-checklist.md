@@ -24,7 +24,7 @@ API 接入后，先完成不联网、不扣费的 dry-run。只有 API 配置可
 视频模型：AutoDL.Art MiniMax-H3，固定工作流 `minimax_h3_lightx2v_v5_15s`
 行驶双人对话合理尾帧模式：固定启用
 首帧 `first_frame`：已通过分镜，2160×3840，候选路径和素材哈希
-合理尾帧 `last_frame`：独立生成，2160×3840，候选路径、素材哈希和结构检查结果
+合理尾帧 `last_frame`：独立生成，2160×3840，候选路径、结构检查结果、用户明确通过事件和一级 `尾帧图.png` 的 SHA-256
 AutoDL 提交端点与查询端点：
 AutoDL 鉴权格式：Bearer / raw token
 视频时长：15 秒

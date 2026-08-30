@@ -23,7 +23,7 @@ AutoDL 可能调整请求字段、鉴权格式和价格。任务开始时必须�
 每条新视频只使用首尾帧工作流。请求字段为 `prompt`、`duration`、`resolution`、`first_frame` 和 `last_frame`：
 
 - `first_frame` 使用用户已明确通过且哈希有效的 `2160×3840` 一级 `分镜图.png`。
-- `last_frame` 使用根据该分镜独立生成并通过结构检查的 `2160×3840` 合理尾帧，尾帧不得复用首帧。
+- `last_frame` 使用用户已明确通过且哈希有效的 `2160×3840` 一级 `尾帧图.png`，尾帧不得复用首帧。
 - 图片通过公网 URL 或 `data:image/...;base64,...` 传入；不得提交本地文件路径。
 - `duration` 固定为 `15`。
 - `resolution` 使用 `768p竖` 或任务开始时确认的工作流枚举值。
@@ -49,7 +49,7 @@ python scripts/autodl_h3.py submit `
   --state "_工作文件/任务状态/提交预览.json"
 ```
 
-dry-run 会在本地拒绝缺少 `first_frame`、`last_frame`、固定时长或三项全程提示词规则的 payload，不联网、不产生费用。检查工作流端点、完整 payload、分辨率、首尾帧哈希和 `request_hash` 后，才能请求付费授权。
+dry-run 会在本地拒绝缺少 `first_frame`、`last_frame`、固定时长或三项全程提示词规则的 payload，不联网、不产生费用。检查工作流端点、完整 payload、分辨率、两张一级首尾帧各自的有效通过事件、不同 SHA-256 和 `request_hash` 后，才能请求付费授权。
 
 ## 正式提交
 
