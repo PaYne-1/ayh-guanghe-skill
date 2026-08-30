@@ -215,6 +215,15 @@ def main() -> int:
     assert workflow_spec and workflow_spec.loader
     workflow_module = importlib.util.module_from_spec(workflow_spec)
     workflow_spec.loader.exec_module(workflow_module)
+    assert workflow_module.DELIVERABLE_NAMES == {
+        "视频.mp4",
+        "封面图.png",
+        "发布正文.txt",
+        "话题标签.txt",
+        "标题.txt",
+        "分镜图.png",
+        "尾帧图.png",
+    }
     profile = json.loads(
         (SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json").read_text(encoding="utf-8")
     )
@@ -276,10 +285,13 @@ def main() -> int:
             content_path,
             SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json",
         )
-        assert (content_root / "item" / "_工作文件" / "生成过程" / "合理尾帧提示词.txt").is_file()
+        process = content_root / "item" / "_工作文件" / "生成过程"
+        assert (process / "合理尾帧提示词.txt").is_file()
+        assert (process / "发布正文.txt").read_text(encoding="utf-8") == valid_content["publish_body"] + "\n"
+        assert (process / "话题标签.txt").read_text(encoding="utf-8") == " ".join(valid_content["hashtags"]) + "\n"
     required_phrases = {
-        "SKILL.md": ("minimax_h3_lightx2v", "合理尾帧", "每条项目固定"),
-        "references/workflow.md": ("first_frame", "last_frame", "固定使用"),
+        "SKILL.md": ("minimax_h3_lightx2v", "七项最终产出", "尾帧图.png", "话题标签.txt"),
+        "references/workflow.md": ("first_frame", "last_frame", "尾帧图.png", "发布正文.txt"),
         "references/startup-checklist.md": ("固定启用", "minimax_h3_lightx2v"),
         "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
         "references/content-contract.md": ("双人对话", "合理尾帧"),
@@ -293,6 +305,11 @@ def main() -> int:
         "是否命中行驶双人对话合理尾帧模式：是 / 否",
         "合理尾帧首尾帧视频预计费用（命中时）",
         "新视频默认使用 `minimax_h3_image_audio_to_video_v2_15s`",
+        "五项最终产出",
+        "只有五项固定产出",
+        "发布正文.md",
+        "不作为第二张一级分镜",
+        "不晋升为第二张一级分镜",
     )
     maintained_documents = ("SKILL.md",) + tuple(
         str(path.relative_to(SKILL_ROOT)).replace("\\", "/")

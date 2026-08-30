@@ -90,7 +90,15 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
 
     assert "第一级只保留" in skill
-    for name in ("视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"):
+    for name in (
+        "视频.mp4",
+        "封面图.png",
+        "发布正文.txt",
+        "话题标签.txt",
+        "标题.txt",
+        "分镜图.png",
+        "尾帧图.png",
+    ):
         assert name in skill
     for category in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本"):
         assert category in workflow
@@ -118,7 +126,8 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "review-output" in skill and "audit-outputs" in skill
     assert "自动验收" in review and "不能" in review and "最终晋升" in review
     assert "_工作文件/生成过程/标题.txt" in contract
-    assert "_工作文件/生成过程/发布正文.md" in contract
+    assert "_工作文件/生成过程/发布正文.txt" in contract
+    assert "_工作文件/生成过程/话题标签.txt" in contract
     assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.5.0"
 
 
@@ -202,7 +211,16 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
     item.mkdir()
-    deliverables = {"视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"}
+    deliverables = {
+        "视频.mp4",
+        "封面图.png",
+        "发布正文.txt",
+        "话题标签.txt",
+        "标题.txt",
+        "分镜图.png",
+        "尾帧图.png",
+    }
+    assert runtime.DELIVERABLE_NAMES == deliverables
     for name in deliverables:
         (item / name).write_bytes(name.encode("utf-8"))
     (item / "任务信息.json").write_text("{}", encoding="utf-8")
@@ -225,7 +243,7 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert result["root_clean"] is True
     assert result["remaining_forbidden"] == []
     assert {path.name for path in item.iterdir()} == {"_工作文件"}
-    assert len(result["output_audit"]["demoted"]) == 5
+    assert len(result["output_audit"]["demoted"]) == 7
     assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
     assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
@@ -493,6 +511,32 @@ def test_promote_approved_artifact_archives_previous_root_and_keeps_candidate(tm
     assert runtime._sha256_file(old_root) == event["sha256"]
 
 
+def test_first_and_tail_frames_require_independent_approval_and_hashes(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    item = tmp_path / "V001_卖点_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    first_candidate = process / "分镜候选.png"
+    tail_candidate = process / "尾帧候选.png"
+    first_candidate.write_bytes(b"accepted-first-frame")
+    tail_candidate.write_bytes(b"independent-tail-frame")
+
+    first_event = runtime.record_artifact_decision(
+        item, "分镜图.png", first_candidate, "passed", "用户", "首帧明确通过"
+    )
+    tail_event = runtime.record_artifact_decision(
+        item, "尾帧图.png", tail_candidate, "passed", "用户", "尾帧明确通过"
+    )
+    first_root = runtime.promote_approved_artifact(item, first_event)
+    tail_root = runtime.promote_approved_artifact(item, tail_event)
+
+    assert first_root.name == "分镜图.png"
+    assert tail_root.name == "尾帧图.png"
+    assert runtime._sha256_file(first_root) != runtime._sha256_file(tail_root)
+    assert runtime.validated_promoted_artifact_path(item, "分镜图.png") == first_root
+    assert runtime.validated_promoted_artifact_path(item, "尾帧图.png") == tail_root
+
+
 def test_promote_rolls_back_previous_root_when_final_replace_fails(tmp_path, monkeypatch):
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
@@ -525,12 +569,12 @@ def test_audit_promoted_outputs_demotes_missing_failed_or_revoked_evidence(tmp_p
     candidate = item / "_工作文件" / "生成过程" / "候选正文.md"
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(b"body")
-    root_output = item / "发布正文.md"
+    root_output = item / "发布正文.txt"
     root_output.write_bytes(b"body")
     if decision:
         runtime.record_artifact_decision(
             item,
-            "发布正文.md",
+            "发布正文.txt",
             candidate,
             decision,
             "用户",
@@ -731,9 +775,14 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
     runtime.save_content_package(item, package_path, profile)
 
     assert not (item / "标题.txt").exists()
-    assert not (item / "发布正文.md").exists()
+    assert not (item / "发布正文.txt").exists()
+    assert not (item / "话题标签.txt").exists()
     assert (item / "_工作文件" / "生成过程" / "标题.txt").exists()
-    assert (item / "_工作文件" / "生成过程" / "发布正文.md").exists()
+    body_candidate = item / "_工作文件" / "生成过程" / "发布正文.txt"
+    hashtag_candidate = item / "_工作文件" / "生成过程" / "话题标签.txt"
+    assert body_candidate.read_text(encoding="utf-8") == package["publish_body"] + "\n"
+    assert hashtag_candidate.read_text(encoding="utf-8") == " ".join(package["hashtags"]) + "\n"
+    assert not any(tag in body_candidate.read_text(encoding="utf-8") for tag in package["hashtags"])
     assert (item / "_工作文件" / "生成过程" / "策划内容.json").exists()
     assert (item / "_工作文件" / "生成过程" / "分镜提示词.txt").exists()
     assert (item / "_工作文件" / "生成过程" / "合理尾帧提示词.txt").exists()
