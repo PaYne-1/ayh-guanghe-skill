@@ -223,6 +223,7 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert runtime.DELIVERABLE_NAMES == deliverables
     for name in deliverables:
         (item / name).write_bytes(name.encode("utf-8"))
+    (item / "发布正文.md").write_text("旧格式正文与标签", encoding="utf-8")
     (item / "任务信息.json").write_text("{}", encoding="utf-8")
     (item / "查询结果.json").write_text("{}", encoding="utf-8")
     (item / "视频提示词.txt").write_text("一镜到底", encoding="utf-8")
@@ -249,6 +250,7 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
     assert (item / "_工作文件" / "验收记录" / "自动验收报告.md").exists()
     assert (item / "_工作文件" / "历史版本" / "视频_V02.mp4").exists()
+    assert (item / "_工作文件" / "历史版本" / "旧格式" / "发布正文.md").exists()
     assert (item / "_工作文件" / "历史版本" / "失败版本" / "失败.mp4").exists()
     assert (item / "_工作文件" / "历史版本" / "视频版本" / "V01.mp4").exists()
     demoted_files = list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())
