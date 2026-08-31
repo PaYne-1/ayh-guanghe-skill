@@ -11,16 +11,19 @@ description: Use when a user needs batch product short-video planning, storyboar
 
 ## Required routing
 
-0. **安装后首次接入 API**：技能首次使用时先询问 AutoDL API 是否已接入。未接入时，只引导用户安全配置 `AUTODL_API_KEY` 和 `AUTODL_AUTH_SCHEME`，不得先询问产品路径、扫描素材、创建批次或进入策划流程。不得要求用户把完整密钥粘贴到聊天中。
-1. API 已接入后，先说明 dry-run 不联网、不扣费，并在用户同意后验证配置。API 接入或 dry-run 通过不代表用户已授权付费提交。
-2. 每次任务再读 [启动确认单](references/startup-checklist.md) 和 [11 节点流程](references/workflow.md)。所有 API、模式、分辨率、实时价格和预算一次确认完，再运行。
-3. 每次初始化学习模式或自动模式，以及学习模式收到任务相关用户问题时，必须读 [自动复盘与规避规则](references/automatic-learning-rules.md)。进入每个节点前先生成并读取该节点的正式规则清单；仅列出规则但不应用视为未执行。
-4. 生成策划前读 [内容契约](references/content-contract.md)。使用爱优护配置时再读 [电动轮椅规则](references/ayh-wheelchair-rules.md) 和 `profiles/爱优护电动轮椅_淘宝天猫光合.json`。
-5. 进入任何分镜图或封面底图生图节点前，必须读 [跨智能体生图路由](references/image-generation-routing.md)，严格按照“本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图”执行。
-6. 提交视频前读 [AutoDL H3](references/autodl-h3.md)。先 dry-run；只有启动确认完成且费用获准后才能付费提交。
-7. 成片完成后读 [验收与学习](references/review-learning.md)。最终结果始终由用户人工验收。
+0. **每次任务的第一步都是完整沟通确认**：先读 [启动确认单](references/startup-checklist.md)，向用户完整展示 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。即使 API、产品或历史配置已知也不得跳过；已知项标记 `已提供`，未知项标记 `待确认` 或 `需要提供`。未收到用户明确回复前，不扫描产品素材、不创建批次、不联网查询、不生图、不 dry-run，也不调用付费接口。
+1. **安全接入 API**：清单只询问 AutoDL API 是否已通过安全环境变量接入，不得要求用户把完整密钥粘贴到聊天中。API 未接入时，用户回复后只引导配置 `AUTODL_API_KEY` 和 `AUTODL_AUTH_SCHEME`，其他任务信息保留到后续确认。
+2. 用户明确回复后，先说明 dry-run 不联网、不扣费，再按其授权验证配置。API 接入或 dry-run 通过不代表用户已授权付费提交。
+3. 再读 [11 节点流程](references/workflow.md)，验证用户回复、扫描获准产品目录第一层、查询实时价格，并把 API、模式、分辨率、价格和预算形成最终启动确认单；正式运行前再次取得明确确认。
+4. 每次初始化学习模式或自动模式，以及学习模式收到任务相关用户问题时，必须读 [自动复盘与规避规则](references/automatic-learning-rules.md)。进入每个节点前先生成并读取该节点的正式规则清单；仅列出规则但不应用视为未执行。
+5. 生成策划前读 [内容契约](references/content-contract.md)。使用爱优护配置时再读 [电动轮椅规则](references/ayh-wheelchair-rules.md) 和 `profiles/爱优护电动轮椅_淘宝天猫光合.json`。
+6. 进入任何分镜图或封面底图生图节点前，必须读 [跨智能体生图路由](references/image-generation-routing.md)，严格按照“本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图”执行。
+7. 提交视频前读 [AutoDL H3](references/autodl-h3.md)。先 dry-run；只有启动确认完成且费用获准后才能付费提交。
+8. 成片完成后读 [验收与学习](references/review-learning.md)。最终结果始终由用户人工验收。
 
 ## Start
+
+先完成每次任务必需的三段式启动沟通并获得明确回复；以下命令只能在回复后的验证阶段运行。
 
 只读取用户给定产品文件夹第一层图片。卖点直接使用，一个卖点对应一条独立视频；数量多于卖点时从第一个卖点开始分配余数。
 
