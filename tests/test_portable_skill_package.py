@@ -41,6 +41,32 @@ def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
     assert "¥0.10/秒" not in text
 
 
+def test_startup_communication_is_complete_before_any_task_action():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "每次任务" in skill
+    assert "第一步" in skill
+    assert "你需要提供的内容" in skill
+    assert "本次配置明细" in skill
+    assert "请你回复" in skill
+    for phrase in (
+        "你需要提供的内容",
+        "本次配置明细",
+        "请你回复",
+        "每次任务",
+        "未收到用户明确回复前",
+        "不扫描产品素材",
+        "可复制填写",
+        "已提供",
+        "待确认",
+        "需要提供",
+    ):
+        assert phrase in startup
+
+
 def test_skill_package_contains_required_portable_resources():
     required = {
         "agents/openai.yaml",

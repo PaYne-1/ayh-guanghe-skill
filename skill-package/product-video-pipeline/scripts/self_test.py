@@ -290,9 +290,29 @@ def main() -> int:
         assert (process / "发布正文.txt").read_text(encoding="utf-8") == valid_content["publish_body"] + "\n"
         assert (process / "话题标签.txt").read_text(encoding="utf-8") == " ".join(valid_content["hashtags"]) + "\n"
     required_phrases = {
-        "SKILL.md": ("minimax_h3_lightx2v", "七项最终产出", "尾帧图.png", "话题标签.txt"),
+        "SKILL.md": (
+            "minimax_h3_lightx2v",
+            "七项最终产出",
+            "尾帧图.png",
+            "话题标签.txt",
+            "你需要提供的内容",
+            "本次配置明细",
+            "请你回复",
+            "每次任务",
+            "第一步",
+        ),
         "references/workflow.md": ("first_frame", "last_frame", "尾帧图.png", "发布正文.txt"),
-        "references/startup-checklist.md": ("固定启用", "minimax_h3_lightx2v"),
+        "references/startup-checklist.md": (
+            "固定启用",
+            "minimax_h3_lightx2v",
+            "你需要提供的内容",
+            "本次配置明细",
+            "请你回复",
+            "每次任务",
+            "未收到用户明确回复前",
+            "不扫描产品素材",
+            "可复制填写",
+        ),
         "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
         "references/content-contract.md": ("双人对话", "合理尾帧"),
     }
