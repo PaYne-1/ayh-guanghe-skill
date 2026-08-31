@@ -135,7 +135,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件/验收记录/自动验收报告.md" in review
     assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
     assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -154,7 +154,7 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "_工作文件/生成过程/标题.txt" in contract
     assert "_工作文件/生成过程/发布正文.txt" in contract
     assert "_工作文件/生成过程/话题标签.txt" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
@@ -194,6 +194,28 @@ def test_v1_6_release_contains_seven_root_deliverables():
             "视频.mp4",
         ):
             assert artifact in skill
+
+
+def test_v1_6_1_release_contains_startup_communication_contract():
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.6.1.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        assert "product-video-pipeline/SKILL.md" in names
+        assert "product-video-pipeline/VERSION" in names
+        assert "product-video-pipeline/references/startup-checklist.md" in names
+        assert not any(
+            name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
+            for name in names
+        )
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.6.1"
+        skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
+        startup = bundle.read(
+            "product-video-pipeline/references/startup-checklist.md"
+        ).decode("utf-8")
+        for heading in ("你需要提供的内容", "本次配置明细", "请你回复"):
+            assert heading in skill
+            assert heading in startup
 
 
 def test_automatic_learning_reference_is_complete_and_routed():
