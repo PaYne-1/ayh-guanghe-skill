@@ -496,7 +496,8 @@ def audit_promoted_outputs(
         try:
             root_artifact = deliverable_root_path(item_dir, artifact_name)
         except ValueError as exc:
-            errors.append({"artifact_name": artifact_name, "error": str(exc)})
+            if artifact_name != "视频.mp4":
+                errors.append({"artifact_name": artifact_name, "error": str(exc)})
             missing.append(artifact_name)
             continue
         if not root_artifact.exists():
@@ -537,6 +538,9 @@ def audit_promoted_outputs(
         pass
     for stray_video in sorted(item_dir.glob("*.mp4"), key=lambda path: path.name.casefold()):
         if expected_video is not None and stray_video == expected_video:
+            continue
+        if not stray_video.is_file():
+            errors.append({"artifact_name": "视频.mp4", "error": "一级视频产出路径不是文件"})
             continue
         digest = _sha256_file(stray_video)
         target = _archive_root_artifact(
@@ -699,6 +703,8 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
     if not dry_run:
         output_audit = audit_promoted_outputs(item_dir)
         ensure_work_dirs(item_dir)
+        plan = [(source, target) for source, target in plan if source.exists()]
+        duplicates = [entry for entry in duplicates if entry[0].exists()]
         for source, target in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))

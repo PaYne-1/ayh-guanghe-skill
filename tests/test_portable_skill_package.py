@@ -26,10 +26,18 @@ def load_script(name: str):
     return module
 
 
+def approve_publish_title(runtime, item: Path, publish_title: str = "出门更轻松") -> Path:
+    candidate = item / "_工作文件" / "生成过程" / "标题候选.txt"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(f"发布标题：{publish_title}\n封面标题：安心出行\n", encoding="utf-8")
+    event = runtime.record_artifact_decision(item, "标题.txt", candidate, "passed", "用户", "标题明确通过")
+    return runtime.promote_approved_artifact(item, event)
+
+
 def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
     text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "name: product-video-pipeline" in text
-    assert "description: Use when" in text
+    assert "description: Use only when the user explicitly says" in text
     assert "Codex" in text
     assert "WorkBuddy" in text
     assert "Hermes" in text
@@ -100,7 +108,7 @@ def test_image_generation_routing_is_fixed_and_cross_agent_safe():
 
     assert "references/image-generation-routing.md" in skill
     assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" in routing
-    assert "不得调用当前智能体自身的原生生图能力" in routing
+    assert "用户明确指定“只在 Codex 内生图”" in routing
     assert "2160×3840" in routing
     assert "SHA-256" in routing
     assert "不得跳级" in routing
@@ -133,8 +141,8 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert '--state "_工作文件/任务状态/提交预览.json"' in autodl
     assert '--state "_工作文件/任务状态/AutoDL提交结果.json"' in autodl
     assert "_工作文件/验收记录/自动验收报告.md" in review
-    assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
-    assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
+    assert "按发布标题清洗命名的 `.mp4`" in skill
+    assert "最终文件按 [交互与最终交付契约]" in workflow
     assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
 
 
@@ -315,17 +323,22 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert result["root_clean"] is True
     assert result["remaining_forbidden"] == []
     assert {path.name for path in item.iterdir()} == {"_工作文件"}
-    assert len(result["output_audit"]["demoted"]) == 7
+    assert len(result["output_audit"]["demoted"]) == 8
     assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
     assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
     assert (item / "_工作文件" / "验收记录" / "自动验收报告.md").exists()
-    assert (item / "_工作文件" / "历史版本" / "视频_V02.mp4").exists()
+    assert any(
+        path.name.startswith("视频_V02_")
+        for path in (item / "_工作文件" / "历史版本" / "已撤换产出").iterdir()
+    )
     assert (item / "_工作文件" / "历史版本" / "旧格式" / "发布正文.md").exists()
     assert (item / "_工作文件" / "历史版本" / "失败版本" / "失败.mp4").exists()
     assert (item / "_工作文件" / "历史版本" / "视频版本" / "V01.mp4").exists()
     demoted_files = list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())
-    assert {path.read_bytes() for path in demoted_files} == {name.encode("utf-8") for name in deliverables}
+    assert {path.read_bytes() for path in demoted_files} == {
+        name.encode("utf-8") for name in deliverables - {"视频.mp4"}
+    }
 
     repeated = runtime.organize_item_dir(item)
     assert repeated["moved"] == []
@@ -401,7 +414,7 @@ def test_real_world_audio_review_names_are_classified_as_review_evidence(tmp_pat
     candidate = tmp_path / "口播音轨验收_双角色清晰版.md"
     candidate.write_text("通过", encoding="utf-8")
 
-    category, relative = runtime.classify_legacy_entry(candidate)
+    category, relative = runtime.classify_legacy_entry(tmp_path, candidate)
 
     assert category == "验收记录"
     assert relative.name == candidate.name
@@ -716,6 +729,7 @@ def test_review_output_cli_accepts_relative_candidate_and_promotes_passed_file(t
     candidate = item / relative
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(b"approved-video")
+    title_path = approve_publish_title(runtime, item)
 
     exit_code = runtime.main(
         [
@@ -736,7 +750,8 @@ def test_review_output_cli_accepts_relative_candidate_and_promotes_passed_file(t
     )
 
     assert exit_code == 0
-    assert (item / "视频.mp4").read_bytes() == b"approved-video"
+    assert (item / f"{runtime._publish_title_from_file(item)}.mp4").read_bytes() == b"approved-video"
+    assert title_path.read_text(encoding="utf-8") == "发布标题：出门更轻松\n封面标题：安心出行\n"
 
 
 def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
@@ -767,7 +782,8 @@ def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path)
 def test_organize_cli_propagates_output_audit_errors_and_root_is_not_clean(tmp_path, capsys):
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
-    (item / "视频.mp4").mkdir(parents=True)
+    title_path = approve_publish_title(runtime, item)
+    (item / f"{runtime._publish_title_from_file(item)}.mp4").mkdir(parents=True)
 
     exit_code = runtime.main(["organize", "--item-dir", str(item)])
     output = json.loads(capsys.readouterr().out)
@@ -776,6 +792,7 @@ def test_organize_cli_propagates_output_audit_errors_and_root_is_not_clean(tmp_p
     assert output["root_clean"] is False
     assert "视频.mp4" in output["remaining_forbidden"]
     assert output["output_audit"]["errors"]
+    assert title_path.exists()
 
 
 def test_content_validator_enforces_confirmed_ayh_contract():
@@ -901,8 +918,10 @@ def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tm
     )
     assert preview["payload"]["duration"] == 15
     assert preview["payload"]["resolution"] == "768p竖"
-    assert preview["payload"]["first_frame"].startswith("data:image/png;base64,")
-    assert preview["payload"]["last_frame"].startswith("data:image/png;base64,")
+    assert preview["payload"]["ref_image_0"].startswith("data:image/png;base64,")
+    assert preview["payload"]["ref_image_1"].startswith("data:image/png;base64,")
+    assert "first_frame" not in preview["payload"]
+    assert "last_frame" not in preview["payload"]
     assert "aigc_watermark" not in preview["payload"]
     assert "secret" not in json.dumps(preview, ensure_ascii=False)
     assert client.extract_task_id({"task_id": "root-task"}) == "root-task"
@@ -1013,7 +1032,7 @@ def test_new_videos_use_fixed_first_last_frames_and_native_dialogue():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
+    assert "所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`" in skill
     assert "行驶双人对话合理尾帧模式：固定启用" in startup
     assert "生成原生双角色对话" in workflow
     assert "模型原生双角色对话音轨" in autodl
@@ -1040,7 +1059,7 @@ def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
     assert "每条项目固定为轮椅真实向前行驶" in skill
-    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
+    assert "所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`" in skill
     assert "2160×3840" in workflow
     assert "约 1–1.5 米" in workflow
     assert "尾帧不得复用首帧" in autodl
@@ -1107,7 +1126,8 @@ def test_review_report_shows_candidate_video_without_treating_unapproved_root_as
     candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(b"candidate-video")
-    (item / "视频.mp4").write_bytes(b"unapproved-video")
+    approve_publish_title(runtime, item)
+    (item / f"{runtime._publish_title_from_file(item)}.mp4").write_bytes(b"unapproved-video")
 
     unapproved_html = runtime.build_review_report(batch).read_text(encoding="utf-8")
     assert "<video controls" in unapproved_html
