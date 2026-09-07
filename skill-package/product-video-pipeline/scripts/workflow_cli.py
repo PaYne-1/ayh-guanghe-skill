@@ -1492,6 +1492,23 @@ def start_rerun(batch_dir: Path, video_id: str, now: Optional[datetime] = None) 
     task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
     if int(task.get("retry_count", 0)) != 0:
         raise ValueError("V02 是唯一一次重跑，禁止再次创建重跑")
+    previous_submission = {
+        key: task.get(key)
+        for key in ("task_id", "request_id", "request_hash", "estimated_cost_yuan")
+        if task.get(key) is not None
+    }
+    if previous_submission:
+        task.setdefault("submission_history", []).append(
+            {"version": "V01", **previous_submission}
+        )
+    task.update(
+        {
+            "task_id": None,
+            "request_id": None,
+            "request_hash": None,
+            "estimated_cost_yuan": None,
+        }
+    )
     task["retry_count"] = 1
     task["status"] = "V02_READY"
     task["rerun_started_at"] = (now or datetime.now().astimezone()).isoformat()

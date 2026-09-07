@@ -1658,7 +1658,15 @@ def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
     batch.mkdir()
     item = batch / "V001_卖点_待生成"
     runtime.ensure_work_dirs(item)
-    task = {"video_id": "V001", "retry_count": 0, "status": "REVIEW_FAILED"}
+    task = {
+        "video_id": "V001",
+        "retry_count": 0,
+        "status": "REVIEW_FAILED",
+        "task_id": "v01-task",
+        "request_id": "v01-request",
+        "request_hash": "v01-hash",
+        "estimated_cost_yuan": "3.00",
+    }
     runtime.atomic_write_json(runtime.work_path(item, "任务状态", "任务信息.json"), task)
     runtime.atomic_write_json(batch / "批次任务表.json", {"items": [task]})
 
@@ -1668,6 +1676,9 @@ def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
     table = json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))
     assert updated["retry_count"] == 1
     assert updated["status"] == "V02_READY"
+    assert updated["task_id"] is None
+    assert updated["request_hash"] is None
+    assert updated["submission_history"][-1]["version"] == "V01"
     assert table["items"][0]["retry_count"] == 1
     assert runtime.work_path(item, "历史版本", "视频版本/V02_唯一一次重跑").is_dir()
     with pytest.raises(ValueError, match="V02"):
@@ -1902,3 +1913,194 @@ def test_batch_content_is_accepted_in_one_deterministic_operation(tmp_path, monk
 
     assert result == {"ok": True, "accepted": ["V001", "V002"]}
     assert len(calls) == 2
+
+
+def test_runner_poll_and_download_do_not_increment_model_calls(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (state_dir / "提交请求.json").write_text(
+        json.dumps({
+            "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
+            "duration": 15,
+            "resolution": "768p竖",
+            "first_frame": "data:image/png;base64,AAAA",
+            "last_frame": "data:image/png;base64,BBBB",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+    state.model_calls_by_video["V001"] = 2
+
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: {"task_id": "task-1", "request_hash": "hash-1"})
+    monkeypatch.setattr(runner, "_poll_item", lambda *a, **k: {"status": "completed", "url": "https://example.invalid/video.mp4"})
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: process / "视频候选.mp4")
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True})
+
+    result = runner.run_autodl_item(batch, item, state, api_key="test", dry_run=False)
+
+    assert result["ok"] is True
+    assert state.model_calls_by_video["V001"] == 2
+
+
+def test_existing_task_id_prevents_second_paid_submit(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "task_id": "existing-task"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: pytest.fail("must not submit"))
+    monkeypatch.setattr(
+        runner,
+        "_poll_item",
+        lambda *a, **k: {
+            "status": "completed",
+            "url": "https://example.invalid/existing.mp4",
+        },
+    )
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: tmp_path / "video.mp4")
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True})
+
+    result = runner.run_autodl_item(batch, item, runner.RunnerState.new("digest"), api_key="test")
+
+    assert result["resumed_task_id"] == "existing-task"
+
+
+def test_paid_v01_requires_confirmed_total_within_budget(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "12.00"
+    with pytest.raises(PermissionError, match="超过批准预算"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 0}, "V001")
+
+
+def test_v02_requires_separate_video_authorization():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    with pytest.raises(PermissionError, match="V02 单独付费授权"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+    state.rerun_budget_by_video["V001"] = "3.00"
+    runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+
+
+def test_existing_request_hash_without_task_id_blocks_resubmit(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "request_hash": "existing-hash"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: pytest.fail("must not submit"))
+
+    with pytest.raises(PermissionError, match="request_hash"):
+        runner.run_autodl_item(batch, item, runner.RunnerState.new("digest"), api_key="test")
+
+
+def test_paid_v01_requires_both_budget_values_and_v03_is_forbidden():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "GENERATING"
+
+    with pytest.raises(PermissionError, match="缺少 V01"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 0}, "V001")
+
+    with pytest.raises(PermissionError, match="禁止提交 V03"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 2}, "V001")
+
+
+def test_validate_video_file_uses_argument_list_ffprobe_and_returns_compact_result(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    candidate = tmp_path / "候选 视频.mp4"
+    candidate.write_bytes(b"not-empty")
+    observed = {}
+
+    def fake_run(arguments, **kwargs):
+        observed["arguments"] = arguments
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video", "width": 768, "height": 1365},
+                        {"codec_type": "audio"},
+                    ],
+                    "format": {"duration": "15.25"},
+                }
+            ),
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner.validate_video_file(candidate, "768p竖")
+
+    assert observed["arguments"] == [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_streams",
+        "-show_format",
+        "-of",
+        "json",
+        str(candidate.resolve()),
+    ]
+    assert observed["kwargs"] == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+    }
+    assert result["ok"] is True
+    assert result["duration"] == 15.25
+    assert result["has_audio"] is True
+    assert set(result) == {"ok", "duration", "width", "height", "has_audio", "sha256"}
+
+
+def test_validate_video_file_rejects_missing_audio(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    candidate = tmp_path / "candidate.mp4"
+    candidate.write_bytes(b"not-empty")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0],
+            0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video", "width": 768, "height": 1365}
+                    ],
+                    "format": {"duration": "15"},
+                }
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="音轨"):
+        runner.validate_video_file(candidate, "768P")
+
+
+def test_autodl_task_status_is_public_and_tolerates_nested_data():
+    client = load_script("autodl_h3.py")
+
+    assert client.task_status({"data": {"status": "COMPLETED"}}) == "completed"

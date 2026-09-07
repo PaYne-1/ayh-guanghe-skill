@@ -169,6 +169,10 @@ def _status(response: Dict[str, object]) -> str:
     return str(_task_data(response).get("status", "unknown")).lower()
 
 
+def task_status(response: Dict[str, object]) -> str:
+    return _status(response)
+
+
 def poll_task(
     task_id: str,
     *,

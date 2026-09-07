@@ -3,8 +3,10 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
@@ -125,12 +127,177 @@ def _load_workflow_cli():
     return module
 
 
+def _load_autodl():
+    path = Path(__file__).with_name("autodl_h3.py")
+    spec = importlib.util.spec_from_file_location("product_video_autodl_h3", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 autodl_h3.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _task_info(item_dir: Path) -> dict[str, object]:
+    path = item_dir / "_工作文件" / "任务状态" / "任务信息.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _submit_item(
+    item_dir: Path, api_key: Optional[str], dry_run: bool
+) -> dict[str, object]:
+    autodl = _load_autodl()
+    payload = item_dir / "_工作文件" / "任务状态" / "提交请求.json"
+    return autodl.submit_payload(
+        payload,
+        api_key=api_key,
+        dry_run=dry_run,
+        confirm_paid=not dry_run,
+        workflow_id=autodl.WORKFLOW_ID,
+    )
+
+
+def _poll_item(task_id: str, api_key: Optional[str]) -> dict[str, object]:
+    autodl = _load_autodl()
+    response = autodl.poll_task(task_id, api_key=api_key)
+    status = autodl.task_status(response)
+    result: dict[str, object] = {"status": status, "response": response}
+    if status in {"success", "succeeded", "completed"}:
+        result["url"] = autodl.first_result_url(response)
+    return result
+
+
+def _download_item(url: str, item_dir: Path) -> Path:
+    autodl = _load_autodl()
+    return autodl.download_atomic(
+        url, item_dir / "_工作文件" / "生成过程" / "视频候选.mp4"
+    )
+
+
+def assert_paid_submit_allowed(
+    state: RunnerState, task_info: dict[str, object], video_id: str
+) -> None:
+    if state.status not in {"RUNNING_AUTOMATICALLY", "GENERATING"}:
+        raise PermissionError("当前状态不允许付费提交")
+    retry_count = int(task_info.get("retry_count", 0))
+    if retry_count == 0:
+        if not state.approved_budget or not state.estimated_v01_total:
+            raise PermissionError("缺少 V01 批次预算授权或预计总价")
+        if Decimal(state.estimated_v01_total) > Decimal(state.approved_budget):
+            raise PermissionError("V01 预计总价超过批准预算")
+        return
+    if retry_count == 1 and video_id not in state.rerun_budget_by_video:
+        raise PermissionError(f"{video_id} 缺少 V02 单独付费授权")
+    if retry_count > 1:
+        raise PermissionError("禁止提交 V03")
+
+
+def validate_video_file(path: Path, expected_resolution: str) -> dict[str, object]:
+    path = path.resolve()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError("视频候选不存在或为空")
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise ValueError("视频候选无法通过 ffprobe 解码")
+    probe = json.loads(completed.stdout)
+    streams = probe.get("streams", [])
+    video = next((row for row in streams if row.get("codec_type") == "video"), None)
+    audio = next((row for row in streams if row.get("codec_type") == "audio"), None)
+    if video is None or audio is None:
+        raise ValueError("视频候选必须同时包含可解码画面和音轨")
+    width = int(video.get("width", 0))
+    height = int(video.get("height", 0))
+    duration = float(probe.get("format", {}).get("duration", 0))
+    expected = {"768P": (768, 1365), "768p竖": (768, 1365), "2K": (1440, 2560)}
+    if expected_resolution not in expected:
+        raise ValueError(f"未知视频分辨率：{expected_resolution}")
+    if not 13 <= duration <= 17:
+        raise ValueError("视频时长必须在 13–17 秒技术容差内")
+    if height <= width or (width, height) != expected[expected_resolution]:
+        raise ValueError("视频方向或分辨率不符合启动确认单")
+    return {
+        "ok": True,
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "has_audio": True,
+        "sha256": _sha256(path),
+    }
+
+
+def run_autodl_item(
+    batch_dir: Path,
+    item_dir: Path,
+    state: RunnerState,
+    *,
+    api_key: Optional[str] = None,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    video_id = item_dir.name.split("_", 1)[0]
+    info = _task_info(item_dir)
+    task_id = str(info.get("task_id") or "")
+    submitted: dict[str, object] = {}
+    if not task_id:
+        if info.get("request_hash"):
+            raise PermissionError("已有 request_hash 但缺少 task_id，禁止重复付费提交")
+        if not dry_run:
+            assert_paid_submit_allowed(state, info, video_id)
+        submitted = _submit_item(item_dir, api_key, dry_run)
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "request_hash": submitted["request_hash"],
+            }
+        task_id = str(submitted["task_id"])
+        workflow = _load_workflow_cli()
+        workflow.record_task(
+            batch_dir,
+            video_id,
+            task_id,
+            request_id=submitted.get("request_id"),
+            request_hash=submitted.get("request_hash"),
+        )
+    polled = _poll_item(task_id, api_key)
+    resumed_task_id = task_id if not submitted else ""
+    if polled["status"] not in {"success", "succeeded", "completed"}:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "resumed_task_id": resumed_task_id,
+            "status": polled["status"],
+        }
+    candidate = _download_item(str(polled["url"]), item_dir)
+    technical = validate_video_file(candidate, str(info.get("resolution", "768P")))
+    return {
+        "ok": bool(technical["ok"]),
+        "task_id": task_id,
+        "resumed_task_id": resumed_task_id,
+        "candidate": str(candidate.resolve()),
+        "technical": technical,
+    }
 
 
 def normalize_web_image(
