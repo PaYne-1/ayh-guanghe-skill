@@ -496,7 +496,7 @@ def audit_promoted_outputs(
         try:
             root_artifact = deliverable_root_path(item_dir, artifact_name)
         except ValueError as exc:
-            if artifact_name != "视频.mp4":
+            if artifact_name != "视频.mp4" or (item_dir / "标题.txt").exists():
                 errors.append({"artifact_name": artifact_name, "error": str(exc)})
             missing.append(artifact_name)
             continue

@@ -72,3 +72,23 @@ python skill-package/product-video-pipeline/scripts/self_test.py
 ```
 
 `git diff --check` completed without whitespace errors. The diff is restricted to the baseline test and the directly implicated workflow script; no low-cost automation production files were introduced.
+
+## Review follow-up: malformed approved publish titles
+
+Review found that the initial missing-title handling suppressed every `ValueError` while resolving the title-derived `视频.mp4` path. That made a present `标题.txt` whose `发布标题：` line was empty or contained only invalid filename characters look like a benign missing video.
+
+The audit now treats only an actually absent `标题.txt` as a normal missing video. If `标题.txt` exists, any title-parsing `ValueError` is retained as a `视频.mp4` audit error. A focused real-code regression test creates an immutable, approved title candidate containing `发布标题：！！！` and verifies that error; in the same test, an item with no title verifies that `视频.mp4` is missing with no video error.
+
+### Follow-up RED/GREEN
+
+```powershell
+python -m pytest tests/test_portable_skill_package.py -q -k "audit_outputs_allows_absent_title_but_reports_malformed_approved_publish_title or organize_item_dir_preserves_identical_file_and_directory_duplicates or batch_organizer_only_visits_video_items_and_preserves_batch_files"
+# RED: 1 failed, 2 passed, 66 deselected in 0.24s
+# GREEN: 3 passed, 66 deselected in 0.10s
+
+python -m pytest tests/test_portable_skill_package.py -q
+# 69 passed in 5.40s
+
+python skill-package/product-video-pipeline/scripts/self_test.py
+# product-video-pipeline 自检通过（无网络、无付费调用）
+```

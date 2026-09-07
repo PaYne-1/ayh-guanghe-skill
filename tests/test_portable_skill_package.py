@@ -768,6 +768,33 @@ def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
     assert root_output.exists()
 
 
+def test_audit_outputs_allows_absent_title_but_reports_malformed_approved_publish_title(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    absent_title_item = tmp_path / "V001_卖点_待生成"
+    absent_title_item.mkdir()
+
+    absent_title_audit = runtime.audit_promoted_outputs(absent_title_item, dry_run=True)
+
+    assert "视频.mp4" in absent_title_audit["missing"]
+    assert not any(error["artifact_name"] == "视频.mp4" for error in absent_title_audit["errors"])
+
+    malformed_title_item = tmp_path / "V002_卖点_待生成"
+    candidate = malformed_title_item / "_工作文件" / "生成过程" / "标题候选.txt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("发布标题：！！！\n封面标题：安心出行\n", encoding="utf-8")
+    event = runtime.record_artifact_decision(
+        malformed_title_item, "标题.txt", candidate, "passed", "用户", "标题明确通过"
+    )
+    runtime.promote_approved_artifact(malformed_title_item, event)
+
+    malformed_title_audit = runtime.audit_promoted_outputs(malformed_title_item, dry_run=True)
+
+    assert any(
+        error["artifact_name"] == "视频.mp4" and "标题.txt 未包含可用于视频文件名" in error["error"]
+        for error in malformed_title_audit["errors"]
+    )
+
+
 def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path):
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
