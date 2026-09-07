@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "image": {
+    "provider": "gpt_web",
+    "human_review": false,
+    "model_visual_review": false,
+    "target_width": 2160,
+    "target_height": 3840,
+    "download_retries": 1
+  },
+  "approvals": {
+    "startup_budget": true,
+    "v01_within_budget": "automatic",
+    "v02": "user_required",
+    "final_video": "user_required"
+  },
+  "model_budget": {
+    "per_video": 6,
+    "batch_content_calls": 1
+  },
+  "autodl": {
+    "workflow_id": "minimax_h3_lightx2v_v5_15s",
+    "duration_seconds": 15,
+    "poll_interval_seconds": 20,
+    "poll_timeout_seconds": 3600
+  },
+  "states": [
+    "WAITING_START_APPROVAL",
+    "RUNNING_AUTOMATICALLY",
+    "WAITING_PAID_APPROVAL",
+    "GENERATING",
+    "WAITING_FINAL_REVIEW",
+    "WAITING_RERUN_APPROVAL",
+    "COMPLETED",
+    "BLOCKED"
+  ]
+}

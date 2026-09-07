@@ -1696,6 +1696,33 @@ def test_self_test_covers_learning_resources_and_commands():
     assert "start-rerun" in text
 
 
+def test_compact_pipeline_policy_is_versioned_and_web_only():
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    assert policy["version"] == 1
+    assert policy["image"] == {
+        "provider": "gpt_web",
+        "human_review": False,
+        "model_visual_review": False,
+        "target_width": 2160,
+        "target_height": 3840,
+        "download_retries": 1,
+    }
+    assert policy["approvals"] == {
+        "startup_budget": True,
+        "v01_within_budget": "automatic",
+        "v02": "user_required",
+        "final_video": "user_required",
+    }
+    assert policy["model_budget"]["per_video"] == 6
+
+
+def test_policy_digest_is_stable_for_key_order():
+    runtime = load_script("pipeline_policy.py")
+    left = {"b": 2, "a": 1}
+    right = {"a": 1, "b": 2}
+    assert runtime.policy_digest(left) == runtime.policy_digest(right)
+
+
 def test_cover_cli_accepts_utf8_title_file(tmp_path):
     storyboard = tmp_path / "分镜图.png"
     reference = tmp_path / "参考图.png"
