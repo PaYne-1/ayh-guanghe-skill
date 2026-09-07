@@ -23,6 +23,22 @@ VALID_STATES = {
 }
 
 
+@dataclass(frozen=True)
+class ExternalAction:
+    """A compact hand-off to an external actor; prompt content remains on disk."""
+
+    kind: str
+    video_id: Optional[str] = None
+    artifact: Optional[str] = None
+    prompt_path: Optional[str] = None
+    output_path: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ModelBudgetExceeded(RuntimeError):
+    pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -190,4 +206,97 @@ def accept_web_image(item_dir: Path, artifact_name: str, source: Path) -> dict[s
         "path": str(promoted.resolve()),
         "sha256": technical["sha256"],
         "size": technical["target_size"],
+    }
+
+
+def consume_model_call(
+    state: RunnerState, policy: dict[str, object], *, video_id: Optional[str]
+) -> None:
+    limits = policy["model_budget"]
+    if not isinstance(limits, dict):
+        raise ModelBudgetExceeded("模型调用预算配置无效")
+    if video_id is None:
+        limit = int(limits["batch_content_calls"])
+        if state.model_calls_batch >= limit:
+            raise ModelBudgetExceeded("批次内容模型调用预算已耗尽")
+        state.model_calls_batch += 1
+        return
+    limit = int(limits["per_video"])
+    used = state.model_calls_by_video.get(video_id, 0)
+    if used >= limit:
+        raise ModelBudgetExceeded(f"{video_id} 模型调用预算已耗尽")
+    state.model_calls_by_video[video_id] = used + 1
+
+
+def record_image_failure(
+    state: RunnerState, *, video_id: str, artifact: str, reason: str
+) -> dict[str, object]:
+    key = f"{video_id}:{artifact}"
+    failures = state.image_failures.get(key, 0) + 1
+    state.image_failures[key] = failures
+    if failures == 1:
+        return {
+            "kind": "RETRY_GPT_WEB_IMAGE",
+            "video_id": video_id,
+            "artifact": artifact,
+            "attempt": 2,
+            "reason": reason,
+        }
+    transition(state, "BLOCKED", reason=f"{key} 两次技术失败：{reason}")
+    return {"kind": "BLOCKED", "reason": state.blocked_reason}
+
+
+def _video_items(batch_dir: Path) -> list[Path]:
+    return sorted(
+        path for path in batch_dir.iterdir() if path.is_dir() and path.name.startswith("V")
+    )
+
+
+def accept_batch_content(
+    batch_dir: Path, content_dir: Path, profile_path: Path
+) -> dict[str, object]:
+    workflow = _load_workflow_cli()
+    accepted: list[str] = []
+    for item in _video_items(batch_dir):
+        video_id = item.name.split("_", 1)[0]
+        content_path = content_dir / f"{video_id}.json"
+        if not content_path.is_file():
+            raise ValueError(f"缺少结构化内容：{content_path}")
+        workflow.save_content_package(item, content_path, profile_path)
+        accepted.append(video_id)
+    return {"ok": True, "accepted": accepted}
+
+
+def next_action(
+    batch_dir: Path, state: RunnerState, policy: dict[str, object]
+) -> dict[str, object]:
+    if state.status == "WAITING_START_APPROVAL":
+        return {"kind": "USER_START_APPROVAL_REQUIRED"}
+    if state.status == "BLOCKED":
+        return {"kind": "BLOCKED", "reason": state.blocked_reason}
+    if state.status == "WAITING_RERUN_APPROVAL":
+        return {"kind": "USER_RERUN_APPROVAL_REQUIRED"}
+    if state.status == "WAITING_FINAL_REVIEW":
+        return {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+    if state.status == "COMPLETED":
+        return {"kind": "DONE"}
+    for item in _video_items(batch_dir):
+        video_id = item.name.split("_", 1)[0]
+        process = item / "_工作文件" / "生成过程"
+        for artifact, prompt_name, raw_name in (
+            ("分镜图.png", "分镜提示词.txt", "GPT网页原始分镜.png"),
+            ("尾帧图.png", "合理尾帧提示词.txt", "GPT网页原始尾帧.png"),
+            ("封面图.png", "封面提示词.txt", "GPT网页原始封面.png"),
+        ):
+            if not (item / artifact).exists() and (process / prompt_name).exists():
+                return {
+                    "kind": "GPT_WEB_IMAGE_REQUIRED",
+                    "video_id": video_id,
+                    "artifact": artifact,
+                    "prompt_path": str((process / prompt_name).resolve()),
+                    "output_path": str((process / raw_name).resolve()),
+                }
+    return {
+        "kind": "BATCH_CONTENT_REQUIRED",
+        "output_dir": str((batch_dir / "_批次内容").resolve()),
     }

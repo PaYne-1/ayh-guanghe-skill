@@ -1836,3 +1836,69 @@ def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
 
     assert storyboard.read_bytes() == storyboard_before
     assert json.loads(approval_log.read_text(encoding="utf-8")) == events_before
+
+
+def test_model_budget_blocks_only_model_dependent_work():
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.model_calls_by_video["V001"] = policy["model_budget"]["per_video"]
+    with pytest.raises(runner.ModelBudgetExceeded, match="V001"):
+        runner.consume_model_call(state, policy, video_id="V001")
+
+
+def test_next_image_action_is_compact_and_web_only(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    (process / "分镜提示词.txt").write_text("生成轮椅分镜", encoding="utf-8")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+
+    action = runner.next_action(batch, state, policy)
+
+    assert action == {
+        "kind": "GPT_WEB_IMAGE_REQUIRED",
+        "video_id": "V001",
+        "artifact": "分镜图.png",
+        "prompt_path": str((process / "分镜提示词.txt").resolve()),
+        "output_path": str((process / "GPT网页原始分镜.png").resolve()),
+    }
+    assert "prompt" not in action
+
+
+def test_second_image_technical_failure_blocks_the_item():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    first = runner.record_image_failure(
+        state, video_id="V001", artifact="分镜图.png", reason="下载为空"
+    )
+    second = runner.record_image_failure(
+        state, video_id="V001", artifact="分镜图.png", reason="仍然为空"
+    )
+    assert first["kind"] == "RETRY_GPT_WEB_IMAGE"
+    assert first["attempt"] == 2
+    assert second["kind"] == "BLOCKED"
+    assert state.status == "BLOCKED"
+
+
+def test_batch_content_is_accepted_in_one_deterministic_operation(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    (batch / "V001_甲_待生成").mkdir(parents=True)
+    (batch / "V002_乙_待生成").mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    for video_id in ("V001", "V002"):
+        (content_dir / f"{video_id}.json").write_text("{}", encoding="utf-8")
+    calls = []
+    fake_workflow = type("Workflow", (), {"save_content_package": staticmethod(lambda item, content, profile: calls.append((item, content, profile)))})
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+
+    result = runner.accept_batch_content(batch, content_dir, tmp_path / "profile.json")
+
+    assert result == {"ok": True, "accepted": ["V001", "V002"]}
+    assert len(calls) == 2
