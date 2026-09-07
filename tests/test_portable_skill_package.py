@@ -1749,3 +1749,31 @@ def test_cover_cli_accepts_utf8_title_file(tmp_path):
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     image = Image.open(output)
     assert image.text["cover_title"] == "爸妈会操作"
+
+
+def test_runner_state_is_atomic_and_resumable(tmp_path):
+    policy_module = load_script("pipeline_policy.py")
+    runner = load_script("pipeline_runner.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "20260907_批次001"
+    batch.mkdir()
+
+    state = runner.load_or_create_state(batch, policy)
+    assert state.status == "WAITING_START_APPROVAL"
+    assert state.policy_digest == policy_module.policy_digest(policy)
+
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="预算已确认")
+    runner.save_state(batch, state)
+    restored = runner.load_or_create_state(batch, policy)
+
+    assert restored.status == "RUNNING_AUTOMATICALLY"
+    assert restored.history[-1]["reason"] == "预算已确认"
+    assert not (batch / "流水线状态.json.tmp").exists()
+
+
+def test_runner_rejects_unknown_state(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+
+    with pytest.raises(ValueError, match="未知状态"):
+        runner.transition(state, "DO_WHATEVER")
