@@ -169,6 +169,10 @@ def accept_web_image(item_dir: Path, artifact_name: str, source: Path) -> dict[s
             raise ValueError("尾帧处理前必须存在已晋升分镜图")
         if _sha256(storyboard) == technical["sha256"]:
             raise ValueError("尾帧不得与分镜相同")
+    if artifact_name == "分镜图.png":
+        last_frame = workflow.validated_promoted_artifact_path(item_dir, "尾帧图.png")
+        if last_frame is not None and _sha256(last_frame) == technical["sha256"]:
+            raise ValueError("分镜不得与尾帧相同")
     event = workflow.record_artifact_decision(
         item_dir,
         artifact_name,

@@ -1814,3 +1814,25 @@ def test_storyboard_and_last_frame_must_have_distinct_hashes(tmp_path):
     runner.accept_web_image(item, "分镜图.png", source)
     with pytest.raises(ValueError, match="尾帧不得与分镜相同"):
         runner.accept_web_image(item, "尾帧图.png", source)
+
+
+def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    storyboard_source = tmp_path / "storyboard.png"
+    last_frame_source = tmp_path / "last-frame.png"
+    Image.new("RGB", (1152, 2048), "navy").save(storyboard_source)
+    Image.new("RGB", (1152, 2048), "green").save(last_frame_source)
+
+    runner.accept_web_image(item, "分镜图.png", storyboard_source)
+    runner.accept_web_image(item, "尾帧图.png", last_frame_source)
+    storyboard = item / "分镜图.png"
+    storyboard_before = storyboard.read_bytes()
+    approval_log = item / "_工作文件" / "验收记录" / "产出验收记录.json"
+    events_before = json.loads(approval_log.read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError, match="分镜不得与尾帧相同"):
+        runner.accept_web_image(item, "分镜图.png", last_frame_source)
+
+    assert storyboard.read_bytes() == storyboard_before
+    assert json.loads(approval_log.read_text(encoding="utf-8")) == events_before

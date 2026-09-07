@@ -57,3 +57,44 @@ Result:
 - The approval-log assertion follows the existing `{"events": [...]}` log schema.
 - `git diff --check` reports only the repository's normal LF/CRLF normalization warning.
 
+## Follow-up Review Fix: Symmetric Frame-Hash Guard
+
+### RED Evidence
+
+Added `test_storyboard_reacceptance_cannot_match_promoted_last_frame`, covering
+storyboard A → tail B → storyboard B. Before the fix:
+
+```powershell
+python -m pytest tests/test_portable_skill_package.py -k "storyboard_reacceptance_cannot_match_promoted_last_frame" -v
+```
+
+Result: 1 failed, 76 deselected (`DID NOT RAISE`). The storyboard branch lacked a
+check against the already promoted tail frame, so it could overwrite the storyboard
+with the tail hash.
+
+### GREEN Evidence
+
+Added the symmetric pre-event guard for `分镜图.png`. The regression now passes and
+asserts the existing promoted storyboard bytes and approval log are unchanged:
+
+```powershell
+python -m pytest tests/test_portable_skill_package.py -k "storyboard_reacceptance_cannot_match_promoted_last_frame" -v
+```
+
+Result: 1 passed, 76 deselected.
+
+Task 3-focused verification:
+
+```powershell
+python -m pytest tests/test_portable_skill_package.py -k "web_image or storyboard_and_last_frame or storyboard_reacceptance_cannot_match_promoted_last_frame or approval_events or artifact_decision" -v
+```
+
+Result: 9 passed, 68 deselected.
+
+Fresh full portable-package suite:
+
+```powershell
+python -m pytest tests/test_portable_skill_package.py -q
+```
+
+Result: 77 passed.
