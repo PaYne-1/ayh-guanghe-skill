@@ -376,6 +376,31 @@ def _archive_root_artifact(
     return target
 
 
+def _publish_title_from_file(item_dir: Path) -> str:
+    title_path = item_dir / "标题.txt"
+    if not title_path.is_file():
+        raise ValueError("缺少已验收的标题.txt，无法确定视频交付文件名")
+    title_lines = [line.strip() for line in title_path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    publish_line = next(
+        (line for line in title_lines if re.match(r"^\s*发布标题\s*[:：]", line)),
+        title_lines[0] if title_lines else "",
+    )
+    raw_title = re.sub(r"^\s*(?:发布标题|标题)\s*[:：]\s*", "", publish_line).strip()
+    cleaned = "".join(character if character.isalnum() else " " for character in raw_title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        raise ValueError("标题.txt 未包含可用于视频文件名的汉字、字母或数字")
+    return cleaned
+
+
+def deliverable_root_path(item_dir: Path, artifact_name: str) -> Path:
+    if artifact_name not in DELIVERABLE_NAMES:
+        raise ValueError(f"未知产出名称：{artifact_name}")
+    if artifact_name == "视频.mp4":
+        return item_dir / f"{_publish_title_from_file(item_dir)}.mp4"
+    return item_dir / artifact_name
+
+
 def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
     item_dir = item_dir.resolve()
     artifact_name = str(event.get("artifact_name", ""))
@@ -398,7 +423,7 @@ def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
     if not source.is_file() or _sha256_file(source) != digest:
         raise ValueError("候选文件缺失或哈希已变化，不能晋升")
 
-    root_artifact = item_dir / artifact_name
+    root_artifact = deliverable_root_path(item_dir, artifact_name)
     if root_artifact.exists():
         if not root_artifact.is_file():
             raise ValueError(f"一级固定产出路径不是文件：{root_artifact}")
@@ -468,7 +493,12 @@ def audit_promoted_outputs(
     demoted = []
     missing = []
     for artifact_name in sorted(DELIVERABLE_NAMES):
-        root_artifact = item_dir / artifact_name
+        try:
+            root_artifact = deliverable_root_path(item_dir, artifact_name)
+        except ValueError as exc:
+            errors.append({"artifact_name": artifact_name, "error": str(exc)})
+            missing.append(artifact_name)
+            continue
         if not root_artifact.exists():
             missing.append(artifact_name)
             continue
@@ -497,6 +527,32 @@ def audit_promoted_outputs(
                 "sha256": digest,
                 "target": str(target),
                 "latest_event": latest,
+            }
+        )
+
+    expected_video = None
+    try:
+        expected_video = deliverable_root_path(item_dir, "视频.mp4")
+    except ValueError:
+        pass
+    for stray_video in sorted(item_dir.glob("*.mp4"), key=lambda path: path.name.casefold()):
+        if expected_video is not None and stray_video == expected_video:
+            continue
+        digest = _sha256_file(stray_video)
+        target = _archive_root_artifact(
+            item_dir,
+            stray_video,
+            "已撤换产出",
+            audit_time,
+            dry_run=dry_run,
+        )
+        demoted.append(
+            {
+                "artifact_name": "视频.mp4",
+                "physical_name": stray_video.name,
+                "sha256": digest,
+                "target": str(target),
+                "latest_event": None,
             }
         )
 
@@ -540,7 +596,11 @@ def _audit_result_has_errors(result: Dict[str, object]) -> bool:
 def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
     if artifact_name not in DELIVERABLE_NAMES:
         raise ValueError(f"未知产出名称：{artifact_name}")
-    root_artifact = item_dir / artifact_name
+    item_dir = item_dir.resolve()
+    try:
+        root_artifact = deliverable_root_path(item_dir, artifact_name)
+    except ValueError:
+        return None
     if not root_artifact.is_file():
         return None
     try:
@@ -551,8 +611,13 @@ def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Opti
     return root_artifact if latest is not None and latest.get("decision") == "passed" else None
 
 
-def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
-    if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME:
+def classify_legacy_entry(item_dir: Path, path: Path) -> Optional[Tuple[str, Path]]:
+    expected_video = None
+    try:
+        expected_video = deliverable_root_path(item_dir, "视频.mp4")
+    except ValueError:
+        pass
+    if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME or path == expected_video:
         return None
     if path.name == "发布正文.md":
         return "历史版本", Path("旧格式") / path.name
@@ -617,7 +682,7 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
     reserved_duplicate_targets = set()
     conflicts = []
     for source in sorted(item_dir.iterdir(), key=lambda path: path.name.casefold()):
-        classification = classify_legacy_entry(source)
+        classification = classify_legacy_entry(item_dir, source)
         if classification is None:
             continue
         category, relative_target = classification
@@ -646,10 +711,12 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         remaining_forbidden = [
             path.name
             for path in item_dir.iterdir()
-            if classify_legacy_entry(path) is not None and path not in planned_sources
+            if classify_legacy_entry(item_dir, path) is not None and path not in planned_sources
         ]
     else:
-        remaining_forbidden = [path.name for path in item_dir.iterdir() if classify_legacy_entry(path) is not None]
+        remaining_forbidden = [
+            path.name for path in item_dir.iterdir() if classify_legacy_entry(item_dir, path) is not None
+        ]
     audit_error_names = [
         str(error.get("artifact_name"))
         for error in output_audit.get("errors", [])
@@ -1442,7 +1509,7 @@ def start_rerun(batch_dir: Path, video_id: str, now: Optional[datetime] = None) 
 
 def _safe_file_url(item_dir: Path, filename: str) -> str:
     path = validated_promoted_artifact_path(item_dir, filename)
-    return quote(f"{item_dir.name}/{filename}") if path is not None else ""
+    return quote(f"{item_dir.name}/{path.name}") if path is not None else ""
 
 
 def _review_candidate_path(item_dir: Path, artifact_name: str) -> Optional[Path]:

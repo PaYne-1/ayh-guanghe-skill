@@ -224,6 +224,40 @@ def main() -> int:
         "分镜图.png",
         "尾帧图.png",
     }
+    with tempfile.TemporaryDirectory() as delivery_temporary:
+        item_dir = Path(delivery_temporary) / "V001_point_pending"
+        process_dir = item_dir / "_工作文件" / "生成过程"
+        process_dir.mkdir(parents=True)
+        title_candidate = process_dir / "标题.txt"
+        title_candidate.write_text(
+            "发布标题：菜市场湿滑路面，走得稳\n封面标题：湿地稳稳走\n",
+            encoding="utf-8",
+        )
+        title_event = workflow_module.record_artifact_decision(
+            item_dir,
+            "标题.txt",
+            title_candidate,
+            "passed",
+            "self-test",
+            "title approved",
+        )
+        workflow_module.promote_approved_artifact(item_dir, title_event)
+        video_candidate = process_dir / "视频候选.mp4"
+        video_candidate.write_bytes(b"self-test-video")
+        video_event = workflow_module.record_artifact_decision(
+            item_dir,
+            "视频.mp4",
+            video_candidate,
+            "passed",
+            "self-test",
+            "video approved",
+        )
+        promoted_video = workflow_module.promote_approved_artifact(item_dir, video_event)
+        assert promoted_video.name == "菜市场湿滑路面 走得稳.mp4"
+        assert not (item_dir / "视频.mp4").exists()
+        assert workflow_module.validated_promoted_artifact_path(item_dir, "视频.mp4") == promoted_video
+        delivery_audit = workflow_module.audit_promoted_outputs(item_dir)
+        assert any(row["artifact_name"] == "视频.mp4" for row in delivery_audit["valid"])
     profile = json.loads(
         (SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json").read_text(encoding="utf-8")
     )
@@ -300,8 +334,24 @@ def main() -> int:
             "请你回复",
             "每次任务",
             "第一步",
+            "开始产品视频",
+            "制作产品视频",
+            "生成产品视频",
+            "光合视频任务",
+            "GPT 一次生成包含准确标题的完整封面",
+            "用户明确同意重跑后",
+            "首次启动清单不询问 AutoDL API 接入状态或鉴权方式",
+            "自动生产模式的启动确认是前置节点持续执行授权",
+            "任务只有在七项最终产出审计全部有效后才算完成",
         ),
-        "references/workflow.md": ("first_frame", "last_frame", "尾帧图.png", "发布正文.txt"),
+        "references/workflow.md": (
+            "first_frame",
+            "last_frame",
+            "尾帧图.png",
+            "发布正文.txt",
+            "用户明确同意重跑后",
+        ),
+        "references/image-generation-routing.md": ("禁止代码叠字",),
         "references/startup-checklist.md": (
             "固定启用",
             "minimax_h3_lightx2v",
@@ -312,15 +362,35 @@ def main() -> int:
             "未收到用户明确回复前",
             "不扫描产品素材",
             "可复制填写",
+            "只有明确触发词",
+            "只有缺少 `AUTODL_API_KEY`",
+            "自动生产模式不再逐节点询问",
         ),
         "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
         "references/content-contract.md": ("双人对话", "合理尾帧"),
+        "references/delivery-contract.md": (
+            "Codex 原生生图",
+            "批准当前节点后继续",
+            "发布标题",
+            "特殊标点替换为单个空格",
+            "最终文件夹路径",
+            "只读取以 `发布标题：` 开头的行",
+            "七项最终产出全部有效",
+            "能够仅靠等比缩放和留边",
+        ),
+        "references/review-learning.md": (
+            "自动验收只形成证据",
+            "用户明确同意重跑后",
+            "用户明确通过优先于自动验收结论",
+            "追加新的 `passed` 事件",
+        ),
     }
     for relative_path, phrases in required_phrases.items():
         content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
         for phrase in phrases:
             assert phrase in content, f"{relative_path} 缺少统一首尾帧规则：{phrase}"
     forbidden_phrases = (
+        "每个全新的 Codex 任务窗口中，第一条用户消息无论内容是什么",
         "其他场景继续使用已确认的现有工作流",
         "是否命中行驶双人对话合理尾帧模式：是 / 否",
         "合理尾帧首尾帧视频预计费用（命中时）",
@@ -330,6 +400,10 @@ def main() -> int:
         "发布正文.md",
         "不作为第二张一级分镜",
         "不晋升为第二张一级分镜",
+        "封面底图不得让生图模型绘制最终中文标题",
+        "默认可用程序绘制",
+        "第一条用户消息无论内容是什么",
+        "新窗口第一条消息为“你好” | 立即发送完整启动清单",
     )
     maintained_documents = ("SKILL.md",) + tuple(
         str(path.relative_to(SKILL_ROOT)).replace("\\", "/")

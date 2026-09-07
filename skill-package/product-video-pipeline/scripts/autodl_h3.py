@@ -33,7 +33,8 @@ def extract_task_id(response: Dict[str, object]) -> str:
     if not task_id and isinstance(response.get("data"), dict):
         task_id = response["data"].get("task_id")
     if not task_id:
-        raise ValueError("AutoDL 响应中没有 task_id")
+        response_text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        raise ValueError(f"AutoDL 响应中没有 task_id：{response_text}")
     return str(task_id)
 
 
@@ -110,11 +111,19 @@ def submit_payload(
         raise ValueError(f"不支持的工作流 ID：{workflow_id}")
     validate_first_last_payload(payload)
     submit_url = f"{COMFYUI_WORKFLOW_BASE}/{workflow_id}"
+    api_payload = dict(payload)
+    if workflow_id == "minimax_h3_lightx2v_v5_15s":
+        # AutoDL's current 15-second workflow exposes the two images as
+        # ref_image_0/ref_image_1, while the local workflow contract keeps
+        # their semantic roles as first_frame/last_frame.
+        api_payload["ref_image_0"] = api_payload.pop("first_frame")
+        api_payload["ref_image_1"] = api_payload.pop("last_frame")
+        api_payload.setdefault("seed", int(_request_hash(payload)[:12], 16))
     preview = {
         "dry_run": dry_run,
         "url": submit_url,
-        "request_hash": _request_hash(payload),
-        "payload": payload,
+        "request_hash": _request_hash(api_payload),
+        "payload": api_payload,
     }
     if dry_run:
         return preview
@@ -123,7 +132,7 @@ def submit_payload(
     api_key = api_key or os.environ.get("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
-    response = _json_request("POST", submit_url, api_key, auth_scheme, payload, timeout)
+    response = _json_request("POST", submit_url, api_key, auth_scheme, api_payload, timeout)
     return {
         **preview,
         "dry_run": False,
