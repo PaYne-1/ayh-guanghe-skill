@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
+import hashlib
 import importlib.util
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from PIL import Image
 
 STATE_FILENAME = "流水线状态.json"
 VALID_STATES = {
@@ -94,3 +97,93 @@ def transition(state: RunnerState, target: str, *, reason: str = "") -> RunnerSt
         {"at": _now(), "from": previous, "to": target, "reason": reason}
     )
     return state
+
+
+def _load_workflow_cli():
+    path = Path(__file__).with_name("workflow_cli.py")
+    spec = importlib.util.spec_from_file_location("product_video_workflow_cli", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 workflow_cli.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def normalize_web_image(
+    source: Path, output: Path, *, width: int = 2160, height: int = 3840
+) -> dict[str, object]:
+    source = Path(source).resolve()
+    output = Path(output).resolve()
+    if not source.is_file() or source.stat().st_size == 0:
+        raise ValueError("GPT 网页图片不存在或为空")
+    if width <= 0 or height <= 0:
+        raise ValueError("图片目标尺寸必须为正数")
+    try:
+        with Image.open(source) as image:
+            image.load()
+            source_size = image.size
+            if image.width * 16 != image.height * 9:
+                raise ValueError("GPT 网页图片必须为 9:16，禁止自动裁切或拉伸")
+            normalized = image.convert("RGB").resize(
+                (width, height), Image.Resampling.LANCZOS
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output.with_suffix(output.suffix + ".tmp")
+            normalized.save(temporary, format="PNG")
+            temporary.replace(output)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("GPT 网页图片无法在本地解码") from exc
+    return {
+        "source_size": list(source_size),
+        "target_size": [width, height],
+        "sha256": _sha256(output),
+    }
+
+
+def accept_web_image(item_dir: Path, artifact_name: str, source: Path) -> dict[str, object]:
+    if artifact_name not in {"分镜图.png", "尾帧图.png", "封面图.png"}:
+        raise ValueError(f"不支持的图片产出：{artifact_name}")
+    item_dir = Path(item_dir).resolve()
+    item_dir.mkdir(parents=True, exist_ok=True)
+    workflow = _load_workflow_cli()
+    candidate_name = {
+        "分镜图.png": "分镜候选.png",
+        "尾帧图.png": "尾帧候选.png",
+        "封面图.png": "封面候选.png",
+    }[artifact_name]
+    candidate = item_dir / "_工作文件" / "生成过程" / candidate_name
+    technical = normalize_web_image(source, candidate)
+    if artifact_name == "尾帧图.png":
+        storyboard = workflow.validated_promoted_artifact_path(item_dir, "分镜图.png")
+        if storyboard is None:
+            raise ValueError("尾帧处理前必须存在已晋升分镜图")
+        if _sha256(storyboard) == technical["sha256"]:
+            raise ValueError("尾帧不得与分镜相同")
+    event = workflow.record_artifact_decision(
+        item_dir,
+        artifact_name,
+        candidate,
+        "passed",
+        "batch-auto-authorization",
+        "GPT 网页结果按图片免审规则完成本地技术检查并自动晋升",
+    )
+    promoted = workflow.promote_approved_artifact(item_dir, event)
+    return {
+        "ok": True,
+        "provider": "gpt_web",
+        "review": "skipped_by_policy",
+        "artifact": artifact_name,
+        "path": str(promoted.resolve()),
+        "sha256": technical["sha256"],
+        "size": technical["target_size"],
+    }

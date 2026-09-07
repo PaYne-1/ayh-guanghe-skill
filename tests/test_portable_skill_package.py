@@ -1777,3 +1777,40 @@ def test_runner_rejects_unknown_state(tmp_path):
 
     with pytest.raises(ValueError, match="未知状态"):
         runner.transition(state, "DO_WHATEVER")
+
+
+def test_web_image_is_normalized_and_auto_promoted(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    raw = tmp_path / "gpt-result.png"
+    Image.new("RGB", (1152, 2048), "navy").save(raw)
+
+    result = runner.accept_web_image(item, "分镜图.png", raw)
+
+    promoted = item / "分镜图.png"
+    assert result["ok"] is True
+    assert result["review"] == "skipped_by_policy"
+    assert result["provider"] == "gpt_web"
+    assert Image.open(promoted).size == (2160, 3840)
+    events = json.loads(
+        (item / "_工作文件" / "验收记录" / "产出验收记录.json").read_text(encoding="utf-8")
+    )
+    assert events["events"][-1]["confirmed_by"] == "batch-auto-authorization"
+
+
+def test_web_image_rejects_non_nine_sixteen_without_crop(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    source = tmp_path / "square.png"
+    Image.new("RGB", (1024, 1024), "white").save(source)
+    with pytest.raises(ValueError, match="9:16"):
+        runner.normalize_web_image(source, tmp_path / "normalized.png")
+
+
+def test_storyboard_and_last_frame_must_have_distinct_hashes(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    source = tmp_path / "same.png"
+    Image.new("RGB", (1152, 2048), "green").save(source)
+    runner.accept_web_image(item, "分镜图.png", source)
+    with pytest.raises(ValueError, match="尾帧不得与分镜相同"):
+        runner.accept_web_image(item, "尾帧图.png", source)
