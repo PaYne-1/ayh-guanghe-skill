@@ -2537,6 +2537,127 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
     assert restored.pending_action["video_ids"] == ["V001"]
 
 
+@pytest.mark.parametrize("audit_problem", ["missing", "demoted", "valid_absent"])
+def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
+    tmp_path, monkeypatch, capsys, audit_problem
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+    )
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": ""}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit_item = {
+        "item_dir": str(item),
+        "errors": [],
+        "missing": [],
+        "demoted": [],
+    }
+    if audit_problem != "valid_absent":
+        audit_item[audit_problem] = (
+            ["视频.mp4"]
+            if audit_problem == "missing"
+            else [{"artifact_name": "视频.mp4"}]
+        )
+    audit = {"items": [audit_item]}
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args: audit),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert output["video_ids"] == ["V001"]
+    expected_reason_key = "valid" if audit_problem == "valid_absent" else audit_problem
+    assert expected_reason_key in output["failures"][0]["reason"]
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+
+
+def test_complete_review_blocks_unscoped_seven_output_audit_failure(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    (batch / "V001_甲_待生成").mkdir(parents=True)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": ""}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit = {"items": [{"item_dir": "", "missing": ["视频.mp4"]}]}
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args: audit),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "BLOCKED"
+    assert "无法定位视频项目" in output["reason"]
+    assert restored.status == "BLOCKED"
+    assert "无法定位视频项目" in restored.blocked_reason
+
+
 def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, capsys):
     runner = load_script("pipeline_runner.py")
     policy_module = load_script("pipeline_policy.py")

@@ -685,18 +685,67 @@ def _failed_review_items(result_path: Path) -> dict[str, str]:
     return failures
 
 
-def _failed_audit_items(audit: dict[str, object]) -> dict[str, str]:
+def _audit_problem_summary(item: dict[str, object]) -> str:
+    problems: list[str] = []
+    for key in ("errors", "missing", "demoted"):
+        values = item.get(key, [])
+        if not isinstance(values, list):
+            problems.append(f"{key}=invalid")
+            continue
+        if not values:
+            continue
+        names: list[str] = []
+        for value in values:
+            if isinstance(value, dict):
+                label = value.get("artifact_name") or value.get("error") or "unknown"
+                names.append(str(label))
+            else:
+                names.append(str(value))
+        problems.append(f"{key}={','.join(names)}")
+    valid = item.get("valid")
+    if not isinstance(valid, list):
+        problems.append("valid=missing")
+    elif len(valid) != 7:
+        problems.append(f"valid_count={len(valid)}/7")
+    return ";".join(problems)
+
+
+def _failed_audit_items(
+    batch_dir: Path, audit: dict[str, object]
+) -> dict[str, str]:
     failures: dict[str, str] = {}
+    if audit.get("errors"):
+        raise ValueError("最终七项产出审计失败且无法定位视频项目：批次级错误")
     items = audit.get("items", [])
     if not isinstance(items, list):
-        return failures
+        raise ValueError("最终七项产出审计结果无效：items 必须为列表")
+    expected = {
+        item.name.split("_", 1)[0]: item.resolve() for item in _video_items(batch_dir)
+    }
+    seen: set[str] = set()
     for item in items:
-        if not isinstance(item, dict) or not item.get("errors"):
-            continue
-        item_dir = Path(str(item.get("item_dir") or ""))
+        if not isinstance(item, dict):
+            raise ValueError("最终七项产出审计结果无效：项目记录必须为对象")
+        raw_item_dir = str(item.get("item_dir") or "").strip()
+        problem = _audit_problem_summary(item)
+        if not raw_item_dir:
+            if problem:
+                raise ValueError("最终七项产出审计失败且无法定位视频项目")
+            raise ValueError("最终七项产出审计结果无效：缺少 item_dir")
+        item_dir = Path(raw_item_dir).resolve()
         video_id = item_dir.name.split("_", 1)[0]
-        if video_id:
-            failures[video_id] = "最终七项产出审计失败"
+        if video_id not in expected or item_dir != expected[video_id]:
+            raise ValueError(f"最终七项产出审计指向未知视频项目：{raw_item_dir}")
+        if video_id in seen:
+            raise ValueError(f"最终七项产出审计包含重复项目：{video_id}")
+        seen.add(video_id)
+        if problem:
+            failures[video_id] = f"最终七项产出审计失败：{problem}"
+    missing_items = sorted(set(expected) - seen)
+    if missing_items:
+        raise ValueError(
+            f"最终七项产出审计项目不完整：{','.join(missing_items)}"
+        )
     return failures
 
 
@@ -910,17 +959,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             workflow.record_review(batch, args.result, args.knowledge_dir)
             audit = workflow.audit_batch_outputs(batch)
             failures = _failed_review_items(args.result.resolve())
-            failures.update(_failed_audit_items(audit))
-            if failures:
-                result = _route_video_failures(batch, state, failures)
+            try:
+                failures.update(_failed_audit_items(batch, audit))
+            except ValueError as exc:
+                reason = str(exc)
+                state.pending_action = {"kind": "BLOCKED", "reason": reason}
+                transition(state, "BLOCKED", reason=reason)
+                result = {"kind": "BLOCKED", "reason": reason}
             else:
-                state.pending_action = None
-                transition(
-                    state,
-                    "COMPLETED",
-                    reason="最终视频验收及七项产出审计通过",
-                )
-                result = {"kind": "DONE"}
+                if failures:
+                    result = _route_video_failures(batch, state, failures)
+                else:
+                    state.pending_action = None
+                    transition(
+                        state,
+                        "COMPLETED",
+                        reason="最终视频验收及七项产出审计通过",
+                    )
+                    result = {"kind": "DONE"}
             save_state(batch, state)
         else:
             raise ValueError(f"未知命令：{args.command}")
