@@ -28,6 +28,12 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
+def record_offline_submission(runner, item, task_id="offline-task"):
+    info = runner._task_info(item)
+    info.update({"video_id": item.name[:4], "task_id": task_id, "request_hash": "offline-request-" + task_id, "submission_pending": False})
+    runner._write_task_info(item, info)
+
+
 def package(video_id):
     return {
         "video_id": video_id, "selling_point": "操作简单",
@@ -108,6 +114,7 @@ def test_actions_drive_real_prompts_payload_and_review_report(setup_batch, capsy
         assert payload["first_frame"].startswith("data:image/png;base64,")
         assert "P1" in payload["prompt"] and "P2" in payload["prompt"]
     def execute(batch, item, state, **kwargs):
+        record_offline_submission(runner, item, item.name[:4])
         candidate = item / "_工作文件/生成过程/视频候选.mp4"
         candidate.write_bytes(b"offline-video")
         evidence = {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve()), "version": "V01"}
@@ -387,12 +394,15 @@ def test_policy_rejects_malformed_limits_and_review_override(tmp_path):
 def test_remaining_v01_failure_stays_in_rerun_queue(setup_batch, capsys, monkeypatch):
     runner, policy, batch, items, _ = setup_batch
     state = ready(setup_batch, capsys)
+    for item in items:
+        record_offline_submission(runner, item, item.name[:4])
     runner._route_video_failures(batch, state, {"V001": "bad one", "V002": "bad two"})
     assert runner.main(["approve-rerun", "--batch", str(batch), "--video-id", "V001", "--approved-cost", "3"]) == 0
     capsys.readouterr()
     state = runner.load_or_create_state(batch, policy)
     assert state.item_failures["V002"]["kind"] == "video"
     def execute(batch, item, state, **kwargs):
+        record_offline_submission(runner, item, "offline-v02")
         candidate = item / "_工作文件/生成过程/视频候选.mp4"
         candidate.write_bytes(b"V02")
         return {"ok": True, "candidate": str(candidate), "technical": {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate)}}
@@ -408,6 +418,7 @@ def test_runtime_errors_persist_at_item_scope_and_other_item_finishes(setup_batc
     def execute(batch, item, state, **kwargs):
         if item == items[0]:
             raise ValueError("video validation failed")
+        record_offline_submission(runner, item)
         candidate = item / "_工作文件/生成过程/视频候选.mp4"
         candidate.write_bytes(b"good")
         return {"ok": True, "candidate": str(candidate), "technical": {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate)}}

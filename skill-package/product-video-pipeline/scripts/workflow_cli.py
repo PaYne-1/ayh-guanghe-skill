@@ -571,7 +571,7 @@ def audit_promoted_outputs(
     }
 
 
-def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, object]:
+def audit_batch_outputs(batch_dir: Path, dry_run: bool = False, video_ids: Optional[List[str]] = None) -> Dict[str, object]:
     batch_dir = batch_dir.resolve()
     if not batch_dir.is_dir():
         raise ValueError(f"批次目录不存在：{batch_dir}")
@@ -581,6 +581,8 @@ def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, obj
     )
     if not item_dirs:
         raise ValueError(f"批次目录第一层没有 VNNN_ 单条任务目录：{batch_dir}")
+    if video_ids is not None:
+        item_dirs = [item for item in item_dirs if item.name.split("_", 1)[0] in video_ids]
     return {
         "batch_dir": str(batch_dir),
         "dry_run": dry_run,
@@ -1278,7 +1280,7 @@ def initialize_batch(
         "audio": "MiniMax-H3 原生对白；按人物清单匹配音色；轻微环境声；无 BGM",
         "image_max_attempts": 2,
         "video_max_reruns": 1,
-        "concurrency": 3,
+        "concurrency": 1,
         "poll_interval_seconds": 20,
         "poll_timeout_seconds": 3600,
         "max_budget_yuan": str(Decimal(max_budget_yuan)),
@@ -1316,6 +1318,32 @@ def _closing_is_valid(dialogue: str, product_name: str) -> bool:
 
 def validate_content_package(package: Dict[str, object], profile: Dict[str, object]) -> List[str]:
     issues: List[str] = []
+    if not isinstance(package, dict):
+        return ["content.object_required"]
+    # Validate shapes before semantic checks; model JSON is untrusted input.
+    for key in ("publish_title", "cover_title", "storyboard_prompt", "last_frame_prompt", "video_prompt", "publish_body"):
+        if not isinstance(package.get(key, ""), str):
+            issues.append(f"content.{key}.string_required")
+    for key in ("storyboard_people", "hashtags"):
+        values = package.get(key)
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            issues.append(f"content.{key}.string_list_required")
+    for key in ("people", "script_segments"):
+        values = package.get(key)
+        if not isinstance(values, list) or any(not isinstance(v, dict) for v in values):
+            issues.append(f"content.{key}.object_list_required")
+    if issues:
+        return issues
+    for person in package["people"]:
+        if any(not isinstance(person.get(key), str) or not person[key].strip() for key in ("id", "identity", "gender", "age_feel", "position", "action")) or type(person.get("speaks")) is not bool:
+            issues.append("people.field_types")
+    for segment in package["script_segments"]:
+        if any(type(segment.get(key)) not in (int, float) for key in ("start", "end")) or any(not isinstance(segment.get(key), str) or not segment[key].strip() for key in ("speaker_id", "dialogue")):
+            issues.append("script.field_types")
+    if issues:
+        return list(dict.fromkeys(issues))
+    if not package.get("storyboard_prompt", "").strip():
+        issues.append("content.storyboard_prompt_missing")
 
     title = str(package.get("publish_title", ""))
     required_title_term = str(profile["required_title_term"])
@@ -1568,11 +1596,13 @@ def _review_media(batch_dir: Path, item_dir: Path, artifact_name: str) -> Dict[s
         return {"url": "", "status": "尚无候选", "source_path": "", "sha256": ""}
     relative_item = path.relative_to(item_dir).as_posix()
     relative_batch = path.relative_to(batch_dir).as_posix()
+    task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
     return {
         "url": quote(relative_batch),
         "status": status,
         "source_path": relative_item,
         "sha256": _sha256_file(path),
+        "version": "V02" if task.get("retry_count") == 1 else "V01",
     }
 
 
@@ -1586,17 +1616,21 @@ def _organization_result_has_errors(result: Dict[str, object]) -> bool:
     )
 
 
-def build_review_report(batch_dir: Path) -> Path:
+def build_review_report(batch_dir: Path, video_ids: Optional[List[str]] = None) -> Path:
     batch_dir = batch_dir.resolve()
     cards = []
     for item_dir in sorted(path for path in batch_dir.iterdir() if path.is_dir() and re.match(r"V\d{3}_", path.name)):
         video_id = item_dir.name.split("_", 1)[0]
+        if video_ids is not None and video_id not in video_ids:
+            continue
         title_path = validated_promoted_artifact_path(item_dir, "标题.txt") or _review_candidate_path(item_dir, "标题.txt")
         title = title_path.read_text(encoding="utf-8") if title_path is not None else "标题尚无候选"
         task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
         auto_qa_path = read_compatible_path(item_dir, "验收记录", "自动验收报告.md")
         auto_qa = auto_qa_path.read_text(encoding="utf-8") if auto_qa_path.exists() else "尚无自动验收报告"
         video = _review_media(batch_dir, item_dir, "视频.mp4")
+        if not video["url"]:
+            continue
         cover = _review_media(batch_dir, item_dir, "封面图.png")
         video_tag = f'<video controls preload="metadata" src="{video["url"]}"></video>' if video["url"] else '<p class="missing">视频尚未下载</p>'
         cover_tag = f'<img src="{cover["url"]}" alt="{video_id} 封面">' if cover["url"] else ""
@@ -1604,7 +1638,7 @@ def build_review_report(batch_dir: Path) -> Path:
             f'视频：{video["status"]}；候选：{video["source_path"] or "无"}；SHA-256：{video["sha256"] or "无"}'
         )
         cards.append(
-            f'''<section class="video-card" data-video-id="{html.escape(video_id)}" data-video-source="{html.escape(video["source_path"])}" data-video-sha256="{html.escape(video["sha256"])}">
+            f'''<section class="video-card" data-video-id="{html.escape(video_id)}" data-video-source="{html.escape(video["source_path"])}" data-video-sha256="{html.escape(video["sha256"])}" data-video-version="{html.escape(video["version"])}">
   <h2>{html.escape(video_id)}</h2>
   <div class="media">{video_tag}{cover_tag}</div>
   <p>{video_evidence}</p>
@@ -1634,7 +1668,7 @@ document.getElementById('complete').addEventListener('click',()=>{{
     const reason=card.querySelector('.reason').value.trim();
     if(!choice) error='每个视频都必须选择通过或不通过';
     if(choice && choice.value==='failed' && !reason) error='不通过的视频必须填写原因';
-    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim(),artifacts:{{'视频.mp4':{{source_path:card.dataset.videoSource,sha256:card.dataset.videoSha256}}}}}});
+    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim(),artifacts:{{'视频.mp4':{{source_path:card.dataset.videoSource,sha256:card.dataset.videoSha256,version:card.dataset.videoVersion}}}}}});
   }});
   if(error){{document.getElementById('error').textContent=error;return;}}
   const blob=new Blob([JSON.stringify({{completed_at:new Date().toISOString(),items}},null,2)],{{type:'application/json'}});

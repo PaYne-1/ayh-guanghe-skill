@@ -320,6 +320,8 @@ def main() -> int:
     assert "people.exactly_two_required" in content_issues
     assert "script.exactly_two_speakers_required" in content_issues
     assert "content.tail_frame_prompt_missing" in content_issues
+    for malformed in ([], "invalid", None, {"storyboard_people": None}, {"hashtags": None}):
+        assert workflow_module.validate_content_package(malformed, profile)
     incomplete_prompt_content = dict(single_person_content)
     incomplete_prompt_content["video_prompt"] = "一镜到底，连续平稳运镜"
     assert "shot.full_duration_rules_missing" in workflow_module.validate_content_package(

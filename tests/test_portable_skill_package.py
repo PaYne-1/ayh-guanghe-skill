@@ -59,10 +59,14 @@ def configure_paid_runner_fixture(runner, batch, item, state):
 
 
 def offline_video_result(runner, item, task_id="offline-task"):
+    from test_pipeline_runtime_contract import record_offline_submission
+    record_offline_submission(runner, item, task_id)
     candidate = item / "_工作文件/生成过程/视频候选.mp4"
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_bytes(b"offline-validated-video")
-    return {"ok": True, "task_id": task_id, "candidate": str(candidate), "technical": {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate)}}
+    technical = {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate), "task_id": task_id, "version": f"V{runner._item_retry_count(item) + 1:02d}", "candidate": str(candidate.resolve())}
+    runner._persist_video_evidence(item, technical)
+    return {"ok": True, "task_id": task_id, "candidate": str(candidate), "technical": technical}
 
 
 def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
@@ -1132,9 +1136,10 @@ def test_autodl_reference_uses_current_comfyui_workflow():
 
 def test_workflow_requires_video_to_match_accepted_storyboard_visuals():
     text = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
-    assert "已通过分镜是视频画面的视觉基准" in text
+    assert "已通过本地技术检查的分镜是视频提示词的视觉基准" in text
     assert "人物完整度、产品角度、构图、亮度、曝光、白平衡和色温" in text
-    assert "自动判为视频不合格" in text
+    assert "由用户在最终视频验收中判断" in text
+    assert "不额外触发模型逐段审核" in text
 
 
 def test_rules_require_single_shot_smooth_camera_and_complete_narration():
@@ -1148,7 +1153,8 @@ def test_rules_require_single_shot_smooth_camera_and_complete_narration():
     assert "最多49个汉字" in contract
     assert "自动精简" in contract
     assert "尾句被截断" in review
-    assert "自动判为不合格" in review
+    assert "由用户在最终视频验收时检查全片" in review
+    assert "默认不调用模型做逐段视觉检查或语音转写" in review
     assert "全部台词按自然聊天语速在 15 秒内完整说完" in wheelchair
 
 
@@ -1244,7 +1250,9 @@ def test_review_report_contains_one_card_per_video(tmp_path):
             qa = item / "自动验收报告.md"
         state.write_text(json.dumps({"video_id": video_id, "task_id": f"task-{video_id}"}), encoding="utf-8")
         qa.write_text(f"{video_id} 自动检查通过", encoding="utf-8")
-        (item / "视频.mp4").write_bytes(b"mp4")
+        candidate = item / "_工作文件/生成过程/视频候选.mp4"
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"mp4")
     report = runtime.build_review_report(batch)
     html = report.read_text(encoding="utf-8")
     assert report.name == "批次验收报告.html"
@@ -2530,6 +2538,8 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
         video_id = item_dir.name.split("_", 1)[0]
         observed.append(video_id)
         if video_id == "V001":
+            from test_pipeline_runtime_contract import record_offline_submission
+            record_offline_submission(runner, item_dir, "failed-v01")
             return {"ok": False, "status": "failed", "reason": "provider failed"}
         return offline_video_result(runner, item_dir, "task-2")
 
@@ -2541,11 +2551,11 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
     assert result["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
     assert result["video_ids"] == ["V001"]
     assert state.status == "WAITING_RERUN_APPROVAL"
-    assert state.pending_action["video_ids"] == ["V001"]
+    assert state.human_gate["video_ids"] == ["V001"]
     assert "video:V01" in state.completed_nodes["V002"]
     restored = runner.load_or_create_state(batch, policy)
     assert restored.status == "WAITING_RERUN_APPROVAL"
-    assert restored.pending_action["video_ids"] == ["V001"]
+    assert restored.human_gate["video_ids"] == ["V001"]
 
 
 def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
@@ -2598,6 +2608,7 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
     (state_dir / "任务信息.json").write_text(
         json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
     )
+    offline_video_result(runner, item)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
     runner.save_state(batch, state)
@@ -2611,6 +2622,7 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
                         "video_id": "V001",
                         "decision": decision,
                         "reason": "画面异常" if decision == "failed" else "",
+                        "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, item, "视频.mp4")},
                     }
                 ]
             },
@@ -2641,7 +2653,8 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
         (),
         {
             "record_review": staticmethod(lambda *args: None),
-            "audit_batch_outputs": staticmethod(lambda *args: audit),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
             "_audit_result_has_errors": staticmethod(
                 lambda value: any(row.get("errors") for row in value.get("items", []))
             ),
@@ -2668,7 +2681,7 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
     assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
     assert output["video_ids"] == ["V001"]
     assert restored.status == "WAITING_RERUN_APPROVAL"
-    assert restored.pending_action["video_ids"] == ["V001"]
+    assert restored.human_gate["video_ids"] == ["V001"]
 
 
 @pytest.mark.parametrize("audit_problem", ["missing", "demoted", "valid_absent"])
@@ -2685,13 +2698,14 @@ def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
     (state_dir / "任务信息.json").write_text(
         json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
     )
+    offline_video_result(runner, item)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
     runner.save_state(batch, state)
     result_path = tmp_path / "review.json"
     result_path.write_text(
         json.dumps(
-            {"items": [{"video_id": "V001", "decision": "passed", "reason": ""}]},
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": "", "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, item, "视频.mp4")}}]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2717,7 +2731,8 @@ def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
         (),
         {
             "record_review": staticmethod(lambda *args: None),
-            "audit_batch_outputs": staticmethod(lambda *args: audit),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
         },
     )
     monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
@@ -2757,13 +2772,14 @@ def test_complete_review_blocks_unscoped_seven_output_audit_failure(
     policy = policy_module.load_policy(SKILL_ROOT)
     batch = tmp_path / "batch"
     (batch / "V001_甲_待生成").mkdir(parents=True)
+    offline_video_result(runner, batch / "V001_甲_待生成")
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
     runner.save_state(batch, state)
     result_path = tmp_path / "review.json"
     result_path.write_text(
         json.dumps(
-            {"items": [{"video_id": "V001", "decision": "passed", "reason": ""}]},
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": "", "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, batch / "V001_甲_待生成", "视频.mp4")}}]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2774,7 +2790,8 @@ def test_complete_review_blocks_unscoped_seven_output_audit_failure(
         (),
         {
             "record_review": staticmethod(lambda *args: None),
-            "audit_batch_outputs": staticmethod(lambda *args: audit),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
         },
     )
     monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
@@ -2946,6 +2963,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
                             "视频.mp4": {
                                 "source_path": candidate.relative_to(item).as_posix(),
                                 "sha256": runner._sha256(candidate),
+                                "version": "V01",
                             }
                         },
                     }
@@ -2996,6 +3014,7 @@ def test_non_video_promotion_failure_blocks_without_offering_paid_rerun(
     process.mkdir(parents=True)
     candidate = process / "视频候选.mp4"
     candidate.write_bytes(b"validated-video-candidate")
+    offline_video_result(runner, item)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
     runner.save_state(batch, state)
@@ -3092,6 +3111,7 @@ def test_failed_video_review_promotes_content_before_requesting_v02(
     (process / "话题标签.txt").write_text("#电动轮椅\n", encoding="utf-8")
     candidate = process / "视频候选.mp4"
     candidate.write_bytes(b"rejected-video-candidate")
+    offline_video_result(runner, item)
     for artifact, color in (
         ("分镜图.png", "blue"),
         ("尾帧图.png", "green"),

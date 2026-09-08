@@ -46,8 +46,8 @@ python scripts/workflow_cli.py init `
 2. 调用 `pipeline_runner.py next` 并只执行返回的一个外部动作。
 3. `BATCH_CONTENT_REQUIRED` 按 `prompt_path` 为指定 `video_ids` 写入内容 JSON，调用 `accept-content --action-id "动作ID"`。`GPT_WEB_IMAGE_REQUIRED` 按 `reference_paths` 上传参考图并完成一次网页生成/下载，再调用 `pipeline_runner.py accept-image --action-id "动作ID"`。动作在返回前已保留次数；恢复时沿用同一 `action_id`，不得自行重发生成。
 4. 图片不进行人工审核，也不调用模型进行二次视觉审核；技术检查和自动晋升由脚本完成。
-5. `LOCAL_WORK_REQUIRED` 或 `VIDEO_POLL_PENDING` 时执行 `run-local --batch "批次目录"`；脚本生成首尾帧 payload、执行 AutoDL、保存证据并生成报告。轮询、下载、哈希、晋升、审计和恢复不得调用 DeepSeek。`run-local --dry-run` 只返回 `DRY_RUN_COMPLETE` 预览，不推进真实进度。
-6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，收集用户结果后调用 `complete-review`。`USER_RERUN_APPROVAL_REQUIRED` 只为获批项目调用 `approve-rerun`；金额必须等于该项预计费用。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
+5. `LOCAL_WORK_REQUIRED` 或 `VIDEO_POLL_PENDING` 时执行 `run-local --batch "批次目录"`；脚本顺序生成首尾帧 payload、执行 AutoDL、保存证据并生成报告。若含 `recovery_required`，先修复列明的本地环境问题，再用同一命令恢复原版本/原 task_id，不重新付费。轮询、下载、哈希、晋升、审计和恢复不得调用 DeepSeek。`run-local --dry-run` 只返回 `DRY_RUN_COMPLETE` 预览，不推进真实进度。
+6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
 7. 不得把完整日志粘贴回模型上下文；只读取脚本输出的紧凑 JSON。
 
 默认分别限制批次内容创建 1 次、内容校验修正 1 次、必要异常诊断 1 次；GPT 网页图片单独计数。必要诊断先运行 `reserve-diagnostic --batch "批次目录" --video-id "视频ID" --reason "简短原因"`，按返回动作完成后用 `accept-diagnostic --action-id "动作ID" --result "诊断JSON"` 接收。诊断只记录建议，不扩大付费或重生图授权。
@@ -78,7 +78,7 @@ python scripts/workflow_cli.py init `
 | 审计一级产出 | `workflow_cli.py audit-outputs`，撤下无有效通过证据的文件 |
 | 付费前检查 | `autodl_h3.py submit --dry-run` |
 | 正式提交 | 运行器 `run-local` 在绑定的批准清单内提交；不跳过运行器直接调用付费客户端 |
-| 批量验收 | `workflow_cli.py build-review` |
+| 批量验收 | 打开运行器 `USER_FINAL_REVIEW_REQUIRED` 返回的 `report_path` |
 | 完成交付 | 用户通过视频 → `review-output` → 标题化 `.mp4` → `audit-outputs` 全绿 → `COMPLETED` |
 | 跨 Agent 安装 | 读 [安装说明](references/install.md) |
 
