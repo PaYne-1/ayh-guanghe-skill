@@ -584,7 +584,7 @@ def next_action(
     if state.status == "BLOCKED":
         return {"kind": "BLOCKED", "reason": state.blocked_reason}
     if state.status == "WAITING_RERUN_APPROVAL":
-        return {"kind": "USER_RERUN_APPROVAL_REQUIRED"}
+        return state.pending_action or {"kind": "USER_RERUN_APPROVAL_REQUIRED"}
     if state.status == "WAITING_FINAL_REVIEW":
         return {"kind": "USER_FINAL_REVIEW_REQUIRED"}
     if state.status == "COMPLETED":
@@ -611,6 +611,95 @@ def next_action(
     }
 
 
+def _item_retry_count(item_dir: Path) -> int:
+    raw = _task_info(item_dir).get("retry_count", 0)
+    try:
+        parsed = Decimal(str(raw))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{item_dir.name} 的视频版本状态无效") from exc
+    if (
+        not parsed.is_finite()
+        or parsed != parsed.to_integral_value()
+        or int(parsed) not in {0, 1}
+    ):
+        raise ValueError(f"{item_dir.name} 的视频版本状态无效")
+    return int(parsed)
+
+
+def _route_video_failures(
+    batch_dir: Path,
+    state: RunnerState,
+    failures: dict[str, str],
+) -> dict[str, object]:
+    rerunnable: list[str] = []
+    terminal: list[str] = []
+    for video_id in sorted(failures):
+        item = _find_item_dir(batch_dir, video_id)
+        if _item_retry_count(item) == 0:
+            rerunnable.append(video_id)
+        else:
+            terminal.append(video_id)
+
+    if rerunnable:
+        action: dict[str, object] = {
+            "kind": "USER_RERUN_APPROVAL_REQUIRED",
+            "video_ids": rerunnable,
+            "failures": [
+                {"video_id": video_id, "reason": failures[video_id]}
+                for video_id in rerunnable
+            ],
+        }
+        if terminal:
+            action["non_rerunnable_video_ids"] = terminal
+        state.pending_action = action
+        transition(
+            state,
+            "WAITING_RERUN_APPROVAL",
+            reason=f"V01 失败，等待 V02 授权：{','.join(rerunnable)}",
+        )
+        save_state(batch_dir, state)
+        return action
+
+    reason = f"V02 已失败且禁止再次重跑：{','.join(terminal)}"
+    state.pending_action = {
+        "kind": "BLOCKED",
+        "video_ids": terminal,
+        "failures": [
+            {"video_id": video_id, "reason": failures[video_id]}
+            for video_id in terminal
+        ],
+    }
+    transition(state, "BLOCKED", reason=reason)
+    save_state(batch_dir, state)
+    return {"kind": "BLOCKED", "reason": reason, "video_ids": terminal}
+
+
+def _failed_review_items(result_path: Path) -> dict[str, str]:
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    failures: dict[str, str] = {}
+    for item in result.get("items", []):
+        if isinstance(item, dict) and item.get("decision") == "failed":
+            video_id = str(item.get("video_id") or "")
+            if video_id:
+                failures[video_id] = str(item.get("reason") or "用户最终验收不通过")
+    return failures
+
+
+def _failed_audit_items(audit: dict[str, object]) -> dict[str, str]:
+    failures: dict[str, str] = {}
+    items = audit.get("items", [])
+    if not isinstance(items, list):
+        return failures
+    for item in items:
+        if not isinstance(item, dict) or not item.get("errors"):
+            continue
+        item_dir = Path(str(item.get("item_dir") or ""))
+        video_id = item_dir.name.split("_", 1)[0]
+        if video_id:
+            failures[video_id] = "最终七项产出审计失败"
+    return failures
+
+
 def run_local_until_gate(
     batch_dir: Path,
     state: RunnerState,
@@ -624,7 +713,12 @@ def run_local_until_gate(
     if not items:
         return next_action(batch_dir, state, policy)
     workflow = _load_workflow_cli()
+    failures: dict[str, str] = {}
+    polling: list[str] = []
     for item in items:
+        video_id = item.name.split("_", 1)[0]
+        if "video" in state.completed_nodes.get(video_id, []):
+            continue
         required = ("分镜图.png", "尾帧图.png", "封面图.png")
         if not all(
             workflow.validated_promoted_artifact_path(item, artifact) is not None
@@ -633,11 +727,35 @@ def run_local_until_gate(
             return next_action(batch_dir, state, policy)
         result = run_autodl_item(batch_dir, item, state, dry_run=dry_run)
         if not result.get("ok"):
+            if (
+                state.status == "BLOCKED"
+                or result.get("status") == "RECONCILIATION_REQUIRED"
+            ):
+                reason = state.blocked_reason or str(
+                    result.get("reason", "付费提交状态需要人工核对")
+                )
+                if state.status != "BLOCKED":
+                    transition(state, "BLOCKED", reason=reason)
+                save_state(batch_dir, state)
+                return {"kind": "BLOCKED", "reason": state.blocked_reason}
+            if result.get("status") == "poll_timeout" and result.get("task_id"):
+                polling.append(video_id)
+                continue
             reason = state.blocked_reason or str(result.get("status", "视频执行失败"))
-            if state.status != "BLOCKED":
-                transition(state, "BLOCKED", reason=reason)
-            save_state(batch_dir, state)
-            return {"kind": "BLOCKED", "reason": state.blocked_reason}
+            failures[video_id] = str(result.get("reason") or reason)
+            continue
+        completed = state.completed_nodes.setdefault(video_id, [])
+        if "video" not in completed:
+            completed.append("video")
+    if failures:
+        return _route_video_failures(batch_dir, state, failures)
+    if polling:
+        action = {"kind": "VIDEO_POLL_PENDING", "video_ids": polling}
+        state.pending_action = action
+        transition(state, "GENERATING", reason=f"继续轮询：{','.join(polling)}")
+        save_state(batch_dir, state)
+        return action
+    state.pending_action = None
     transition(state, "WAITING_FINAL_REVIEW", reason="全部视频候选准备完成")
     save_state(batch_dir, state)
     return {"kind": "USER_FINAL_REVIEW_REQUIRED"}
@@ -737,6 +855,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = next_action(batch, state, policy)
         elif args.command == "accept-content":
             consume_model_call(state, policy, video_id=None)
+            save_state(batch, state)
             result = accept_batch_content(
                 batch, args.content_dir.resolve(), args.profile.resolve()
             )
@@ -744,11 +863,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.command == "accept-image":
             item = _find_item_dir(batch, args.video_id)
             consume_model_call(state, policy, video_id=args.video_id)
+            save_state(batch, state)
             result = accept_web_image(item, args.artifact, args.source)
             save_state(batch, state)
         elif args.command == "image-failed":
             _find_item_dir(batch, args.video_id)
             consume_model_call(state, policy, video_id=args.video_id)
+            save_state(batch, state)
             result = record_image_failure(
                 state,
                 video_id=args.video_id,
@@ -761,12 +882,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.command == "approve-rerun":
             if state.status != "WAITING_RERUN_APPROVAL":
                 raise ValueError("当前状态不允许批准 V02 重跑")
+            pending_ids = (
+                state.pending_action.get("video_ids", [])
+                if isinstance(state.pending_action, dict)
+                else []
+            )
+            if args.video_id not in pending_ids:
+                raise ValueError(f"{args.video_id} 不在待批准 V02 的失败项目中")
             rerun_cost = _positive_authorization_amount(
                 args.approved_cost, "V02 批准费用"
             )
             workflow = _load_workflow_cli()
             workflow.start_rerun(batch, args.video_id)
             state.rerun_budget_by_video[args.video_id] = str(rerun_cost)
+            state.pending_action = None
             transition(
                 state,
                 "RUNNING_AUTOMATICALLY",
@@ -780,10 +909,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             workflow = _load_workflow_cli()
             workflow.record_review(batch, args.result, args.knowledge_dir)
             audit = workflow.audit_batch_outputs(batch)
-            if workflow._audit_result_has_errors(audit):
-                transition(state, "BLOCKED", reason="最终七项产出审计失败")
-                result = {"kind": "BLOCKED", "reason": state.blocked_reason}
+            failures = _failed_review_items(args.result.resolve())
+            failures.update(_failed_audit_items(audit))
+            if failures:
+                result = _route_video_failures(batch, state, failures)
             else:
+                state.pending_action = None
                 transition(
                     state,
                     "COMPLETED",

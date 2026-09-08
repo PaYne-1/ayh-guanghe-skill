@@ -2377,6 +2377,212 @@ def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
     assert state["approved_budget"] == ""
 
 
+def test_run_local_collects_v01_failure_and_continues_remaining_items(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    items = [
+        batch / "V001_甲_待生成",
+        batch / "V002_乙_待生成",
+    ]
+    color_sets = (("blue", "green", "orange"), ("red", "yellow", "purple"))
+    for item, colors in zip(items, color_sets):
+        item.mkdir(parents=True)
+        artifacts = ("分镜图.png", "尾帧图.png", "封面图.png")
+        for artifact, color in zip(artifacts, colors):
+            source = tmp_path / f"{item.name}_{artifact}"
+            Image.new("RGB", (1152, 2048), color).save(source)
+            runner.accept_web_image(item, artifact, source)
+
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    observed = []
+
+    def fake_run(batch_dir, item_dir, runner_state, *, dry_run=False):
+        video_id = item_dir.name.split("_", 1)[0]
+        observed.append(video_id)
+        if video_id == "V001":
+            return {"ok": False, "status": "failed", "reason": "provider failed"}
+        return {"ok": True, "task_id": "task-2"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_run)
+
+    result = runner.run_local_until_gate(batch, state, policy)
+
+    assert observed == ["V001", "V002"]
+    assert result["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert result["video_ids"] == ["V001"]
+    assert state.status == "WAITING_RERUN_APPROVAL"
+    assert state.pending_action["video_ids"] == ["V001"]
+    assert "video" in state.completed_nodes["V002"]
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert restored.pending_action["video_ids"] == ["V001"]
+
+
+def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (1152, 2048), color).save(source)
+        runner.accept_web_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    monkeypatch.setattr(
+        runner,
+        "run_autodl_item",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "status": "poll_timeout",
+            "task_id": "known-task",
+        },
+    )
+
+    result = runner.run_local_until_gate(batch, state, policy)
+
+    assert result == {"kind": "VIDEO_POLL_PENDING", "video_ids": ["V001"]}
+    assert state.status == "GENERATING"
+    assert state.pending_action == result
+
+
+@pytest.mark.parametrize("failure_source", ["review", "audit"])
+def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
+    tmp_path, monkeypatch, capsys, failure_source
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+    )
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    decision = "failed" if failure_source == "review" else "passed"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": decision,
+                        "reason": "画面异常" if decision == "failed" else "",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit = {
+        "items": [
+            {
+                "item_dir": str(item),
+                "errors": (
+                    [{"artifact_name": "视频.mp4"}]
+                    if failure_source == "audit"
+                    else []
+                ),
+            }
+        ]
+    }
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args: audit),
+            "_audit_result_has_errors": staticmethod(
+                lambda value: any(row.get("errors") for row in value.get("items", []))
+            ),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert output["video_ids"] == ["V001"]
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert restored.pending_action["video_ids"] == ["V001"]
+
+
+def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, capsys):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    (batch / "V001_甲_待生成").mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+
+    return_code = runner.main(
+        [
+            "accept-content",
+            "--batch",
+            str(batch),
+            "--content-dir",
+            str(content_dir),
+            "--profile",
+            str(tmp_path / "missing-profile.json"),
+        ]
+    )
+    assert return_code == 2
+    assert json.loads(capsys.readouterr().out)["kind"] == "BLOCKED"
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.model_calls_batch == 1
+
+    source = tmp_path / "invalid-square.png"
+    Image.new("RGB", (64, 64), "black").save(source)
+    return_code = runner.main(
+        [
+            "accept-image",
+            "--batch",
+            str(batch),
+            "--video-id",
+            "V001",
+            "--artifact",
+            "分镜图.png",
+            "--source",
+            str(source),
+        ]
+    )
+    assert return_code == 2
+    assert json.loads(capsys.readouterr().out)["kind"] == "BLOCKED"
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.model_calls_by_video["V001"] == 1
+
+
 def test_autodl_task_status_is_public_and_tolerates_nested_data():
     client = load_script("autodl_h3.py")
 
