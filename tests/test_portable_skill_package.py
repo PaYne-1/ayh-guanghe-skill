@@ -1948,6 +1948,8 @@ def test_runner_poll_and_download_do_not_increment_model_calls(tmp_path, monkeyp
 
     assert result["ok"] is True
     assert state.model_calls_by_video["V001"] == 2
+    recorded = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    assert recorded["submission_pending"] is False
 
 
 def test_existing_task_id_prevents_second_paid_submit(tmp_path, monkeypatch):
@@ -2008,8 +2010,100 @@ def test_existing_request_hash_without_task_id_blocks_resubmit(tmp_path, monkeyp
     )
     monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: pytest.fail("must not submit"))
 
-    with pytest.raises(PermissionError, match="request_hash"):
-        runner.run_autodl_item(batch, item, runner.RunnerState.new("digest"), api_key="test")
+    state = runner.RunnerState.new("digest")
+    result = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert result["status"] == "RECONCILIATION_REQUIRED"
+    assert result["request_hash"] == "existing-hash"
+    assert state.status == "BLOCKED"
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "missing_task_id"])
+def test_ambiguous_paid_submit_is_persisted_and_never_submitted_twice(
+    tmp_path, monkeypatch, outcome
+):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    calls = []
+
+    def ambiguous_submit(*args, **kwargs):
+        calls.append(kwargs["dry_run"])
+        if kwargs["dry_run"]:
+            return {"dry_run": True, "request_hash": "stable-hash"}
+        pending_before_post = json.loads(
+            (state_dir / "任务信息.json").read_text(encoding="utf-8")
+        )
+        assert pending_before_post["submission_pending"] is True
+        assert pending_before_post["request_hash"] == "stable-hash"
+        if outcome == "timeout":
+            raise RuntimeError("provider accepted request but response timed out")
+        return {"request_hash": "stable-hash"}
+
+    monkeypatch.setattr(runner, "_submit_item", ambiguous_submit)
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    first = runner.run_autodl_item(batch, item, state, api_key="test")
+    persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    second = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert first["status"] == "RECONCILIATION_REQUIRED"
+    assert second["status"] == "RECONCILIATION_REQUIRED"
+    assert persisted["submission_pending"] is True
+    assert persisted["request_hash"] == "stable-hash"
+    assert not (state_dir / "任务信息.json.tmp").exists()
+    assert calls == [True, False]
+    assert state.status == "BLOCKED"
+
+
+def test_task_recording_ambiguity_preserves_task_identity_and_blocks_resume(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    calls = []
+
+    def accepted_submit(*args, **kwargs):
+        calls.append(kwargs["dry_run"])
+        if kwargs["dry_run"]:
+            return {"request_hash": "stable-hash"}
+        return {
+            "task_id": "accepted-task",
+            "request_id": "accepted-request",
+            "request_hash": "stable-hash",
+        }
+
+    def fail_record(*args, **kwargs):
+        raise OSError("disk error")
+
+    failing_workflow = type(
+        "Workflow", (), {"record_task": staticmethod(fail_record)}
+    )
+    monkeypatch.setattr(runner, "_submit_item", accepted_submit)
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: failing_workflow)
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    first = runner.run_autodl_item(batch, item, state, api_key="test")
+    persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    second = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert first["status"] == "RECONCILIATION_REQUIRED"
+    assert second["status"] == "RECONCILIATION_REQUIRED"
+    assert persisted["submission_pending"] is True
+    assert persisted["task_id"] == "accepted-task"
+    assert persisted["request_id"] == "accepted-request"
+    assert calls == [True, False]
 
 
 def test_paid_v01_requires_both_budget_values_and_v03_is_forbidden():
@@ -2022,6 +2116,71 @@ def test_paid_v01_requires_both_budget_values_and_v03_is_forbidden():
 
     with pytest.raises(PermissionError, match="禁止提交 V03"):
         runner.assert_paid_submit_allowed(state, {"retry_count": 2}, "V001")
+
+
+@pytest.mark.parametrize("retry_count", [-1, 3, "bad", None])
+def test_paid_submit_rejects_invalid_retry_count(retry_count):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "GENERATING"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    with pytest.raises(PermissionError, match="V03|版本"):
+        runner.assert_paid_submit_allowed(
+            state, {"retry_count": retry_count}, "V001"
+        )
+
+
+@pytest.mark.parametrize(
+    "amount", ["", "0", "-0.01", "NaN", "Infinity", "not-money"]
+)
+def test_v02_authorization_amount_must_be_finite_and_positive(amount):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.rerun_budget_by_video["V001"] = amount
+
+    with pytest.raises(PermissionError, match="有限正数"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+
+
+def test_runner_uses_batch_confirmation_resolution_for_2k_video(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "task_id": "existing-task"}),
+        encoding="utf-8",
+    )
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"resolution": "2K"}), encoding="utf-8"
+    )
+    observed = {}
+    monkeypatch.setattr(
+        runner,
+        "_poll_item",
+        lambda *a, **k: {
+            "status": "completed",
+            "url": "https://example.invalid/video.mp4",
+        },
+    )
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: tmp_path / "video.mp4")
+
+    def validate(path, expected_resolution):
+        observed["resolution"] = expected_resolution
+        return {"ok": True}
+
+    monkeypatch.setattr(runner, "validate_video_file", validate)
+
+    result = runner.run_autodl_item(
+        batch, item, runner.RunnerState.new("digest"), api_key="test"
+    )
+
+    assert result["ok"] is True
+    assert observed["resolution"] == "2K"
 
 
 def test_validate_video_file_uses_argument_list_ffprobe_and_returns_compact_result(

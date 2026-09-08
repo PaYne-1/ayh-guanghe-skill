@@ -6,7 +6,7 @@ import json
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
@@ -150,6 +150,81 @@ def _task_info(item_dir: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def _write_task_info(item_dir: Path, info: dict[str, object]) -> Path:
+    path = item_dir / "_工作文件" / "任务状态" / "任务信息.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(path)
+    return path
+
+
+def _persist_pending_submission(
+    item_dir: Path, info: dict[str, object], request_hash: str
+) -> dict[str, object]:
+    pending = dict(info)
+    pending.update(
+        {
+            "request_hash": request_hash,
+            "submission_pending": True,
+            "status": "SUBMISSION_PENDING",
+            "submission_pending_at": _now(),
+        }
+    )
+    _write_task_info(item_dir, pending)
+    return pending
+
+
+def _persist_submission_response(
+    item_dir: Path,
+    info: dict[str, object],
+    submitted: dict[str, object],
+) -> dict[str, object]:
+    response_info = dict(info)
+    response_info.update(
+        {
+            "task_id": submitted["task_id"],
+            "request_id": submitted.get("request_id"),
+            "request_hash": submitted["request_hash"],
+            "submission_pending": True,
+            "status": "SUBMISSION_RESPONSE_PENDING_RECORD",
+        }
+    )
+    _write_task_info(item_dir, response_info)
+    return response_info
+
+
+def _reconciliation_required(
+    state: RunnerState,
+    item_dir: Path,
+    info: dict[str, object],
+    reason: str,
+) -> dict[str, object]:
+    blocked_info = dict(info)
+    blocked_info.update(
+        {
+            "submission_pending": True,
+            "status": "RECONCILIATION_REQUIRED",
+            "reconciliation_reason": reason,
+        }
+    )
+    _write_task_info(item_dir, blocked_info)
+    blocked_reason = f"AutoDL 提交结果需要人工核对：{reason}"
+    if state.status != "BLOCKED" or state.blocked_reason != blocked_reason:
+        transition(state, "BLOCKED", reason=blocked_reason)
+    result: dict[str, object] = {
+        "ok": False,
+        "status": "RECONCILIATION_REQUIRED",
+        "request_hash": str(blocked_info.get("request_hash") or ""),
+        "reason": blocked_reason,
+    }
+    if blocked_info.get("task_id"):
+        result["task_id"] = str(blocked_info["task_id"])
+    return result
+
+
 def _submit_item(
     item_dir: Path, api_key: Optional[str], dry_run: bool
 ) -> dict[str, object]:
@@ -186,17 +261,60 @@ def assert_paid_submit_allowed(
 ) -> None:
     if state.status not in {"RUNNING_AUTOMATICALLY", "GENERATING"}:
         raise PermissionError("当前状态不允许付费提交")
-    retry_count = int(task_info.get("retry_count", 0))
+    raw_retry_count = task_info.get("retry_count", 0)
+    try:
+        parsed_retry_count = Decimal(str(raw_retry_count))
+    except (InvalidOperation, ValueError) as exc:
+        raise PermissionError("付费提交版本无效；仅允许 V01 或 V02") from exc
+    if (
+        not parsed_retry_count.is_finite()
+        or parsed_retry_count != parsed_retry_count.to_integral_value()
+        or int(parsed_retry_count) not in {0, 1}
+    ):
+        raise PermissionError("禁止提交 V03 或无效视频版本")
+    retry_count = int(parsed_retry_count)
     if retry_count == 0:
         if not state.approved_budget or not state.estimated_v01_total:
             raise PermissionError("缺少 V01 批次预算授权或预计总价")
-        if Decimal(state.estimated_v01_total) > Decimal(state.approved_budget):
+        approved = _positive_authorization_amount(
+            state.approved_budget, "V01 批次预算授权"
+        )
+        estimated = _positive_authorization_amount(
+            state.estimated_v01_total, "V01 预计总价"
+        )
+        if estimated > approved:
             raise PermissionError("V01 预计总价超过批准预算")
         return
-    if retry_count == 1 and video_id not in state.rerun_budget_by_video:
+    if video_id not in state.rerun_budget_by_video:
         raise PermissionError(f"{video_id} 缺少 V02 单独付费授权")
-    if retry_count > 1:
-        raise PermissionError("禁止提交 V03")
+    _positive_authorization_amount(
+        state.rerun_budget_by_video[video_id], f"{video_id} 的 V02 单独付费授权金额"
+    )
+
+
+def _positive_authorization_amount(value: object, label: str) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PermissionError(f"{label}必须是有限正数") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise PermissionError(f"{label}必须是有限正数")
+    return amount
+
+
+def _expected_video_resolution(
+    batch_dir: Path, item_dir: Path, task_info: dict[str, object]
+) -> str:
+    candidates = (
+        item_dir / "_工作文件" / "任务状态" / "提交请求.json",
+        batch_dir / "启动确认单.json",
+    )
+    for path in candidates:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("resolution"):
+                return str(data["resolution"])
+    return str(task_info.get("resolution") or "768P")
 
 
 def validate_video_file(path: Path, expected_resolution: str) -> dict[str, object]:
@@ -259,27 +377,47 @@ def run_autodl_item(
     info = _task_info(item_dir)
     task_id = str(info.get("task_id") or "")
     submitted: dict[str, object] = {}
+    if info.get("submission_pending") or (info.get("request_hash") and not task_id):
+        return _reconciliation_required(
+            state,
+            item_dir,
+            info,
+            str(info.get("reconciliation_reason") or "存在未核对的提交请求身份"),
+        )
     if not task_id:
-        if info.get("request_hash"):
-            raise PermissionError("已有 request_hash 但缺少 task_id，禁止重复付费提交")
-        if not dry_run:
-            assert_paid_submit_allowed(state, info, video_id)
-        submitted = _submit_item(item_dir, api_key, dry_run)
+        preview = _submit_item(item_dir, api_key, dry_run=True)
         if dry_run:
             return {
                 "ok": True,
                 "dry_run": True,
-                "request_hash": submitted["request_hash"],
+                "request_hash": preview["request_hash"],
             }
-        task_id = str(submitted["task_id"])
-        workflow = _load_workflow_cli()
-        workflow.record_task(
-            batch_dir,
-            video_id,
-            task_id,
-            request_id=submitted.get("request_id"),
-            request_hash=submitted.get("request_hash"),
-        )
+        assert_paid_submit_allowed(state, info, video_id)
+        request_hash = str(preview.get("request_hash") or "")
+        if not request_hash:
+            raise ValueError("AutoDL 提交预览缺少 request_hash")
+        info = _persist_pending_submission(item_dir, info, request_hash)
+        try:
+            submitted = _submit_item(item_dir, api_key, dry_run=False)
+            task_id = str(submitted.get("task_id") or "")
+            response_hash = str(submitted.get("request_hash") or "")
+            if not task_id:
+                raise RuntimeError("AutoDL 付费响应缺少 task_id")
+            if response_hash != request_hash:
+                raise RuntimeError("AutoDL 付费响应 request_hash 与提交标记不一致")
+            info = _persist_submission_response(item_dir, info, submitted)
+            workflow = _load_workflow_cli()
+            workflow.record_task(
+                batch_dir,
+                video_id,
+                task_id,
+                request_id=submitted.get("request_id"),
+                request_hash=request_hash,
+            )
+        except Exception as exc:
+            if task_id:
+                info["task_id"] = task_id
+            return _reconciliation_required(state, item_dir, info, str(exc))
     polled = _poll_item(task_id, api_key)
     resumed_task_id = task_id if not submitted else ""
     if polled["status"] not in {"success", "succeeded", "completed"}:
@@ -290,7 +428,9 @@ def run_autodl_item(
             "status": polled["status"],
         }
     candidate = _download_item(str(polled["url"]), item_dir)
-    technical = validate_video_file(candidate, str(info.get("resolution", "768P")))
+    technical = validate_video_file(
+        candidate, _expected_video_resolution(batch_dir, item_dir, info)
+    )
     return {
         "ok": bool(technical["ok"]),
         "task_id": task_id,

@@ -1470,6 +1470,7 @@ def record_task(
             "task_id": task_id,
             "request_id": request_id,
             "request_hash": request_hash,
+            "submission_pending": False,
             "status": status,
             "estimated_cost_yuan": estimated_cost_yuan,
             "updated_at": datetime.now().astimezone().isoformat(),
