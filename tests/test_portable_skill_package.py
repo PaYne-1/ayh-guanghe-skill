@@ -135,6 +135,44 @@ def test_current_source_is_v1_7_with_low_cost_runtime_files():
         assert (SKILL_ROOT / relative).is_file()
 
 
+def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "20260907_批次001"
+    item = batch / "V001_轻便_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        raw = tmp_path / artifact
+        Image.new("RGB", (1152, 2048), color).save(raw)
+        runner.accept_web_image(item, artifact, raw)
+
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="offline acceptance")
+    runner.save_state(batch, state)
+    before_calls = dict(state.model_calls_by_video)
+    observed = []
+
+    def offline_autodl(*args, **kwargs):
+        observed.append(kwargs.get("dry_run"))
+        return {"ok": True, "dry_run": True, "request_hash": "offline-dry-hash"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", offline_autodl)
+    result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
+
+    assert result == {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+    assert observed == [True]
+    assert state.model_calls_by_video == before_calls
+    assert runner.load_or_create_state(batch, policy).status == "WAITING_FINAL_REVIEW"
+    for artifact in ("分镜图.png", "尾帧图.png", "封面图.png"):
+        assert (item / artifact).is_file()
+
+
 def test_clean_first_level_and_work_file_rules_are_documented():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
