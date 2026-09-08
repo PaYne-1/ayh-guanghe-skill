@@ -125,6 +125,16 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
     assert len(text) <= 9000
 
 
+def test_current_source_is_v1_7_with_low_cost_runtime_files():
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
+    for relative in (
+        "pipeline_policy.json",
+        "scripts/pipeline_policy.py",
+        "scripts/pipeline_runner.py",
+    ):
+        assert (SKILL_ROOT / relative).is_file()
+
+
 def test_clean_first_level_and_work_file_rules_are_documented():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
@@ -151,7 +161,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件/验收记录/自动验收报告.md" in review
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "最终文件按 [交互与最终交付契约]" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -170,7 +180,7 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "_工作文件/生成过程/标题.txt" in contract
     assert "_工作文件/生成过程/发布正文.txt" in contract
     assert "_工作文件/生成过程/话题标签.txt" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
