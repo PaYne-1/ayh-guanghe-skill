@@ -102,19 +102,27 @@ def test_skill_package_contains_required_portable_resources():
     assert required <= present
 
 
-def test_image_generation_routing_is_fixed_and_cross_agent_safe():
+def test_image_generation_routing_is_gpt_web_only_and_review_free():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(encoding="utf-8")
+    startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    delivery = (SKILL_ROOT / "references" / "delivery-contract.md").read_text(encoding="utf-8")
+    combined = "\n".join((skill, routing, startup, workflow, delivery))
+    assert "GPT 网页端是唯一生图渠道" in combined
+    assert "不进行人工图片审核" in combined
+    assert "不调用模型进行二次视觉审核" in combined
+    assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" not in combined
+    assert "Codex 原生生图" not in combined
+    assert "pipeline_runner.py accept-image" in combined
 
-    assert "references/image-generation-routing.md" in skill
-    assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" in routing
-    assert "用户明确指定“只在 Codex 内生图”" in routing
-    assert "2160×3840" in routing
-    assert "SHA-256" in routing
-    assert "不得跳级" in routing
-    assert "不得要求用户提供账号密码" in routing
-    assert "dry-run" in routing
-    assert "第三个候选仍不合格" in routing
+
+def test_skill_runtime_entry_is_compact_and_runner_driven():
+    text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "pipeline_runner.py next" in text
+    assert "只执行返回的一个外部动作" in text
+    assert "不得把完整日志粘贴回模型上下文" in text
+    assert len(text) <= 9000
 
 
 def test_clean_first_level_and_work_file_rules_are_documented():
