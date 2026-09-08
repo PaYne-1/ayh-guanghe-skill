@@ -685,6 +685,92 @@ def _failed_review_items(result_path: Path) -> dict[str, str]:
     return failures
 
 
+def _promote_passed_candidate(
+    workflow: object,
+    item_dir: Path,
+    artifact_name: str,
+    source_path: Path,
+    *,
+    confirmed_by: str,
+    feedback: str,
+    expected_sha256: str = "",
+) -> Path:
+    promoted = workflow.validated_promoted_artifact_path(item_dir, artifact_name)
+    if promoted is not None:
+        if expected_sha256 and _sha256(promoted) != expected_sha256:
+            raise ValueError(f"{artifact_name} 已晋升产出与验收哈希不一致")
+        return promoted
+
+    source_path = source_path if source_path.is_absolute() else item_dir / source_path
+    source_path = source_path.resolve()
+    if not source_path.is_file():
+        raise ValueError(f"{artifact_name} 候选不存在：{source_path}")
+    digest = _sha256(source_path)
+    if expected_sha256 and digest != expected_sha256:
+        raise ValueError(f"{artifact_name} 候选哈希与验收结果不一致")
+    events = workflow.load_approval_events(item_dir)
+    event = workflow.latest_artifact_decision(events, artifact_name, digest)
+    if event is None or event.get("decision") != "passed":
+        event = workflow.record_artifact_decision(
+            item_dir,
+            artifact_name,
+            source_path,
+            "passed",
+            confirmed_by,
+            feedback,
+        )
+    return workflow.promote_approved_artifact(item_dir, event)
+
+
+def _promote_passed_review_outputs(
+    batch_dir: Path, result_path: Path, workflow: object
+) -> None:
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    for decision in result.get("items", []):
+        if not isinstance(decision, dict):
+            raise ValueError("最终验收项目记录必须为对象")
+        video_id = str(decision.get("video_id") or "")
+        item_dir = _find_item_dir(batch_dir, video_id)
+        process = item_dir / "_工作文件" / "生成过程"
+        for artifact_name in ("标题.txt", "发布正文.txt", "话题标签.txt"):
+            try:
+                _promote_passed_candidate(
+                    workflow,
+                    item_dir,
+                    artifact_name,
+                    process / artifact_name,
+                    confirmed_by="batch-auto-authorization",
+                    feedback="结构化内容契约通过后按批次自动执行授权晋升",
+                )
+            except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                raise ValueError(
+                    f"{video_id} 非视频产出晋升失败（{artifact_name}）：{exc}"
+                ) from exc
+
+        if decision.get("decision") != "passed":
+            continue
+        artifacts = decision.get("artifacts")
+        video = artifacts.get("视频.mp4") if isinstance(artifacts, dict) else None
+        if not isinstance(video, dict):
+            raise ValueError(f"{video_id} 视频验收结果缺少候选证据")
+        source_path = str(video.get("source_path") or "").strip()
+        expected_sha256 = str(video.get("sha256") or "").strip().lower()
+        if not source_path or not expected_sha256:
+            raise ValueError(f"{video_id} 视频验收结果缺少候选路径或 SHA-256")
+        try:
+            _promote_passed_candidate(
+                workflow,
+                item_dir,
+                "视频.mp4",
+                Path(source_path),
+                confirmed_by="user-final-review",
+                feedback="用户最终验收明确通过",
+                expected_sha256=expected_sha256,
+            )
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            raise ValueError(f"{video_id} 视频产出晋升失败：{exc}") from exc
+
+
 def _audit_problem_summary(item: dict[str, object]) -> str:
     problems: list[str] = []
     for key in ("errors", "missing", "demoted"):
@@ -708,6 +794,34 @@ def _audit_problem_summary(item: dict[str, object]) -> str:
     elif len(valid) != 7:
         problems.append(f"valid_count={len(valid)}/7")
     return ";".join(problems)
+
+
+def _audit_problem_scope(item: dict[str, object]) -> tuple[set[str], bool]:
+    artifacts: set[str] = set()
+    unknown = False
+    explicit_problem = False
+    for key in ("errors", "missing", "demoted"):
+        values = item.get(key, [])
+        if not isinstance(values, list):
+            unknown = True
+            continue
+        for value in values:
+            explicit_problem = True
+            if isinstance(value, dict):
+                artifact_name = str(value.get("artifact_name") or "")
+            elif key == "missing":
+                artifact_name = str(value)
+            else:
+                artifact_name = ""
+            if artifact_name:
+                artifacts.add(artifact_name)
+            else:
+                unknown = True
+    valid = item.get("valid")
+    valid_problem = not isinstance(valid, list) or len(valid) != 7
+    if valid_problem and not explicit_problem:
+        unknown = True
+    return artifacts, unknown
 
 
 def _failed_audit_items(
@@ -740,6 +854,11 @@ def _failed_audit_items(
             raise ValueError(f"最终七项产出审计包含重复项目：{video_id}")
         seen.add(video_id)
         if problem:
+            artifact_names, unknown_scope = _audit_problem_scope(item)
+            if unknown_scope or any(name != "视频.mp4" for name in artifact_names):
+                raise ValueError(
+                    f"{video_id} 非视频产出审计失败或问题范围不明确：{problem}"
+                )
             failures[video_id] = f"最终七项产出审计失败：{problem}"
     missing_items = sorted(set(expected) - seen)
     if missing_items:
@@ -957,26 +1076,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                 raise ValueError("当前状态不允许完成最终验收")
             workflow = _load_workflow_cli()
             workflow.record_review(batch, args.result, args.knowledge_dir)
-            audit = workflow.audit_batch_outputs(batch)
-            failures = _failed_review_items(args.result.resolve())
             try:
-                failures.update(_failed_audit_items(batch, audit))
+                _promote_passed_review_outputs(batch, args.result.resolve(), workflow)
             except ValueError as exc:
                 reason = str(exc)
                 state.pending_action = {"kind": "BLOCKED", "reason": reason}
                 transition(state, "BLOCKED", reason=reason)
                 result = {"kind": "BLOCKED", "reason": reason}
             else:
-                if failures:
-                    result = _route_video_failures(batch, state, failures)
+                audit = workflow.audit_batch_outputs(batch)
+                failures = _failed_review_items(args.result.resolve())
+                try:
+                    failures.update(_failed_audit_items(batch, audit))
+                except ValueError as exc:
+                    reason = str(exc)
+                    state.pending_action = {"kind": "BLOCKED", "reason": reason}
+                    transition(state, "BLOCKED", reason=reason)
+                    result = {"kind": "BLOCKED", "reason": reason}
                 else:
-                    state.pending_action = None
-                    transition(
-                        state,
-                        "COMPLETED",
-                        reason="最终视频验收及七项产出审计通过",
-                    )
-                    result = {"kind": "DONE"}
+                    if failures:
+                        result = _route_video_failures(batch, state, failures)
+                    else:
+                        state.pending_action = None
+                        transition(
+                            state,
+                            "COMPLETED",
+                            reason="最终视频验收及七项产出审计通过",
+                        )
+                        result = {"kind": "DONE"}
             save_state(batch, state)
         else:
             raise ValueError(f"未知命令：{args.command}")

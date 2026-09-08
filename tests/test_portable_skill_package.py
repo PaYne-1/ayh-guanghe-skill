@@ -2500,6 +2500,12 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
                     if failure_source == "audit"
                     else []
                 ),
+                "missing": [],
+                "demoted": [],
+                "valid": [
+                    {"artifact_name": f"output-{index}"}
+                    for index in range(7 if failure_source == "review" else 6)
+                ],
             }
         ]
     }
@@ -2515,6 +2521,7 @@ def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
         },
     )
     monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
 
     return_code = runner.main(
         [
@@ -2574,6 +2581,9 @@ def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
             if audit_problem == "missing"
             else [{"artifact_name": "视频.mp4"}]
         )
+        audit_item["valid"] = [
+            {"artifact_name": f"output-{index}"} for index in range(6)
+        ]
     audit = {"items": [audit_item]}
     fake_workflow = type(
         "Workflow",
@@ -2584,6 +2594,7 @@ def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
         },
     )
     monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
 
     return_code = runner.main(
         [
@@ -2600,11 +2611,15 @@ def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
     output = json.loads(capsys.readouterr().out)
     restored = runner.load_or_create_state(batch, policy)
     assert return_code == 0
-    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
-    assert output["video_ids"] == ["V001"]
-    expected_reason_key = "valid" if audit_problem == "valid_absent" else audit_problem
-    assert expected_reason_key in output["failures"][0]["reason"]
-    assert restored.status == "WAITING_RERUN_APPROVAL"
+    if audit_problem == "valid_absent":
+        assert output["kind"] == "BLOCKED"
+        assert "问题范围不明确" in output["reason"]
+        assert restored.status == "BLOCKED"
+    else:
+        assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+        assert output["video_ids"] == ["V001"]
+        assert audit_problem in output["failures"][0]["reason"]
+        assert restored.status == "WAITING_RERUN_APPROVAL"
 
 
 def test_complete_review_blocks_unscoped_seven_output_audit_failure(
@@ -2636,6 +2651,7 @@ def test_complete_review_blocks_unscoped_seven_output_audit_failure(
         },
     )
     monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
 
     return_code = runner.main(
         [
@@ -2656,6 +2672,350 @@ def test_complete_review_blocks_unscoped_seven_output_audit_failure(
     assert "无法定位视频项目" in output["reason"]
     assert restored.status == "BLOCKED"
     assert "无法定位视频项目" in restored.blocked_reason
+
+
+def test_runner_happy_path_promotes_seven_outputs_and_completes(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    workflow = load_script("workflow_cli.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_操作简单_待生成"
+    item.mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    package = {
+        "video_id": "V001",
+        "selling_point": "操作简单",
+        "publish_title": "爸妈也能轻松上手的电动轮椅到底怎么样",
+        "cover_title": "爸妈会操作",
+        "people": [
+            {
+                "id": "P1",
+                "identity": "老人",
+                "gender": "女",
+                "age_feel": "70岁左右",
+                "position": "左侧",
+                "action": "坐在轮椅上",
+                "speaks": True,
+            },
+            {
+                "id": "P2",
+                "identity": "家属",
+                "gender": "女",
+                "age_feel": "40岁左右",
+                "position": "右侧",
+                "action": "自然提问",
+                "speaks": True,
+            },
+        ],
+        "storyboard_people": ["P1", "P2"],
+        "script_segments": [
+            {
+                "start": 0,
+                "end": 4,
+                "speaker_id": "P2",
+                "dialogue": "这个操作会不会很难？",
+            },
+            {
+                "start": 4,
+                "end": 11,
+                "speaker_id": "P1",
+                "dialogue": "操作很顺手，我自己就能开，家里人也省心。",
+            },
+            {
+                "start": 11,
+                "end": 15,
+                "speaker_id": "P1",
+                "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。",
+            },
+        ],
+        "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",
+        "last_frame_prompt": "同尺寸合理尾帧，主体继续前进约1至1.5米，产品结构和人物保持一致。",
+        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，轮椅沿直线缓慢前进，不要背景音乐。",
+        "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
+        "hashtags": [
+            "#爱优护电动轮椅",
+            "#ainsnbot高端智能电动轮椅",
+            "#电动轮椅",
+            "#老人专用电动轮椅",
+        ],
+    }
+    (content_dir / "V001.json").write_text(
+        json.dumps(package, ensure_ascii=False), encoding="utf-8"
+    )
+    profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
+
+    assert runner.main(
+        [
+            "approve-start",
+            "--batch",
+            str(batch),
+            "--approved-budget",
+            "10.00",
+            "--estimated-v01-total",
+            "3.00",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert runner.main(
+        [
+            "accept-content",
+            "--batch",
+            str(batch),
+            "--content-dir",
+            str(content_dir),
+            "--profile",
+            str(profile),
+        ]
+    ) == 0
+    capsys.readouterr()
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (1152, 2048), color).save(source)
+        assert runner.main(
+            [
+                "accept-image",
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+                "--artifact",
+                artifact,
+                "--source",
+                str(source),
+            ]
+        ) == 0
+        capsys.readouterr()
+
+    candidate = item / "_工作文件" / "生成过程" / "视频候选.mp4"
+
+    def fake_video_run(*args, **kwargs):
+        candidate.write_bytes(b"validated-video-candidate")
+        return {"ok": True, "candidate": str(candidate), "technical": {"ok": True}}
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_video_run)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "USER_FINAL_REVIEW_REQUIRED"
+
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "passed",
+                        "reason": "",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"kind": "DONE"}
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "COMPLETED"
+    audit = workflow.audit_batch_outputs(batch, dry_run=True)
+    assert len(audit["items"][0]["valid"]) == 7
+    assert audit["items"][0]["missing"] == []
+    assert audit["items"][0]["demoted"] == []
+    assert audit["items"][0]["errors"] == []
+    assert (item / "标题.txt").is_file()
+    assert (item / "发布正文.txt").is_file()
+    assert (item / "话题标签.txt").is_file()
+    assert (item / f"{package['publish_title']}.mp4").is_file()
+
+
+def test_non_video_promotion_failure_blocks_without_offering_paid_rerun(
+    tmp_path, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    candidate = process / "视频候选.mp4"
+    candidate.write_bytes(b"validated-video-candidate")
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "passed",
+                        "reason": "",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "BLOCKED"
+    assert "非视频产出晋升失败" in output["reason"]
+    assert output["kind"] != "USER_RERUN_APPROVAL_REQUIRED"
+    assert restored.status == "BLOCKED"
+
+
+def test_non_video_audit_failure_is_technical_block_not_paid_video_rerun(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
+    audit = {
+        "items": [
+            {
+                "item_dir": str(item),
+                "errors": [],
+                "missing": ["发布正文.txt"],
+                "demoted": [],
+                "valid": [
+                    {"artifact_name": name}
+                    for name in (
+                        "视频.mp4",
+                        "封面图.png",
+                        "话题标签.txt",
+                        "标题.txt",
+                        "分镜图.png",
+                        "尾帧图.png",
+                    )
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="非视频产出审计失败"):
+        runner._failed_audit_items(batch, audit)
+
+
+def test_failed_video_review_promotes_content_before_requesting_v02(
+    tmp_path, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    (process / "标题.txt").write_text(
+        "发布标题：爸妈轻松出行的电动轮椅\n封面标题：轻松操作\n",
+        encoding="utf-8",
+    )
+    (process / "发布正文.txt").write_text("正文内容\n", encoding="utf-8")
+    (process / "话题标签.txt").write_text("#电动轮椅\n", encoding="utf-8")
+    candidate = process / "视频候选.mp4"
+    candidate.write_bytes(b"rejected-video-candidate")
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (1152, 2048), color).save(source)
+        runner.accept_web_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "failed",
+                        "reason": "画面异常",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert output["video_ids"] == ["V001"]
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert (item / "标题.txt").is_file()
+    assert (item / "发布正文.txt").is_file()
+    assert (item / "话题标签.txt").is_file()
 
 
 def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, capsys):
