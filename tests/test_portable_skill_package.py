@@ -2259,6 +2259,124 @@ def test_validate_video_file_rejects_missing_audio(tmp_path, monkeypatch):
         runner.validate_video_file(candidate, "768P")
 
 
+def test_runner_cli_returns_one_compact_json_action(tmp_path):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "next",
+            "--batch",
+            str(batch),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    action = json.loads(result.stdout)
+    assert action == {"kind": "USER_START_APPROVAL_REQUIRED"}
+    assert result.stdout.count("\n") == 1
+    assert len(result.stdout) < 512
+
+
+def test_runner_help_exposes_only_supported_commands():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    commands = (
+        "status",
+        "approve-start",
+        "next",
+        "accept-content",
+        "accept-image",
+        "image-failed",
+        "run-local",
+        "approve-rerun",
+        "complete-review",
+    )
+    for command in commands:
+        assert command in result.stdout
+
+
+def test_run_local_dry_run_stops_at_final_review_and_persists_state(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (1152, 2048), color).save(source)
+        runner.accept_web_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    before_calls = dict(state.model_calls_by_video)
+    observed = []
+
+    def fake_run(batch_dir, item_dir, runner_state, *, dry_run=False):
+        observed.append((batch_dir, item_dir, runner_state, dry_run))
+        return {"ok": True, "dry_run": True, "request_hash": "dry-hash"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_run)
+
+    result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
+
+    assert result == {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+    assert state.model_calls_by_video == before_calls
+    assert observed == [(batch, item, state, True)]
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "WAITING_FINAL_REVIEW"
+
+
+def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "approve-start",
+            "--batch",
+            str(batch),
+            "--approved-budget",
+            "NaN",
+            "--estimated-v01-total",
+            "1.00",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["kind"] == "BLOCKED"
+    state = json.loads((batch / "流水线状态.json").read_text(encoding="utf-8"))
+    assert state["status"] == "WAITING_START_APPROVAL"
+    assert state["approved_budget"] == ""
+
+
 def test_autodl_task_status_is_public_and_tolerates_nested_data():
     client = load_script("autodl_h3.py")
 

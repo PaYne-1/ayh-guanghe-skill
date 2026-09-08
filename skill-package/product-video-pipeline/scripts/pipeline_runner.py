@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+import argparse
 import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -607,3 +609,207 @@ def next_action(
         "kind": "BATCH_CONTENT_REQUIRED",
         "output_dir": str((batch_dir / "_批次内容").resolve()),
     }
+
+
+def run_local_until_gate(
+    batch_dir: Path,
+    state: RunnerState,
+    policy: dict[str, object],
+    *,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    if state.status not in {"RUNNING_AUTOMATICALLY", "GENERATING"}:
+        return next_action(batch_dir, state, policy)
+    items = _video_items(batch_dir)
+    if not items:
+        return next_action(batch_dir, state, policy)
+    workflow = _load_workflow_cli()
+    for item in items:
+        required = ("分镜图.png", "尾帧图.png", "封面图.png")
+        if not all(
+            workflow.validated_promoted_artifact_path(item, artifact) is not None
+            for artifact in required
+        ):
+            return next_action(batch_dir, state, policy)
+        result = run_autodl_item(batch_dir, item, state, dry_run=dry_run)
+        if not result.get("ok"):
+            reason = state.blocked_reason or str(result.get("status", "视频执行失败"))
+            if state.status != "BLOCKED":
+                transition(state, "BLOCKED", reason=reason)
+            save_state(batch_dir, state)
+            return {"kind": "BLOCKED", "reason": state.blocked_reason}
+    transition(state, "WAITING_FINAL_REVIEW", reason="全部视频候选准备完成")
+    save_state(batch_dir, state)
+    return {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+
+
+def _find_item_dir(batch_dir: Path, video_id: str) -> Path:
+    matches = [
+        path
+        for path in _video_items(batch_dir)
+        if path.name.split("_", 1)[0] == video_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"无法唯一定位视频项目：{video_id}")
+    return matches[0]
+
+
+def _print_compact(value: dict[str, object]) -> None:
+    print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="产品视频低成本自动化状态机")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("status", "next"):
+        command = sub.add_parser(name)
+        command.add_argument("--batch", type=Path, required=True)
+    local = sub.add_parser("run-local")
+    local.add_argument("--batch", type=Path, required=True)
+    local.add_argument("--dry-run", action="store_true")
+    approve = sub.add_parser("approve-start")
+    approve.add_argument("--batch", type=Path, required=True)
+    approve.add_argument("--approved-budget", required=True)
+    approve.add_argument("--estimated-v01-total", required=True)
+    content = sub.add_parser("accept-content")
+    content.add_argument("--batch", type=Path, required=True)
+    content.add_argument("--content-dir", type=Path, required=True)
+    content.add_argument("--profile", type=Path, required=True)
+    image = sub.add_parser("accept-image")
+    image.add_argument("--batch", type=Path, required=True)
+    image.add_argument("--video-id", required=True)
+    image.add_argument(
+        "--artifact",
+        choices=("分镜图.png", "尾帧图.png", "封面图.png"),
+        required=True,
+    )
+    image.add_argument("--source", type=Path, required=True)
+    image_failed = sub.add_parser("image-failed")
+    image_failed.add_argument("--batch", type=Path, required=True)
+    image_failed.add_argument("--video-id", required=True)
+    image_failed.add_argument(
+        "--artifact",
+        choices=("分镜图.png", "尾帧图.png", "封面图.png"),
+        required=True,
+    )
+    image_failed.add_argument("--reason", required=True)
+    rerun = sub.add_parser("approve-rerun")
+    rerun.add_argument("--batch", type=Path, required=True)
+    rerun.add_argument("--video-id", required=True)
+    rerun.add_argument("--approved-cost", required=True)
+    review = sub.add_parser("complete-review")
+    review.add_argument("--batch", type=Path, required=True)
+    review.add_argument("--result", type=Path, required=True)
+    review.add_argument(
+        "--knowledge-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "data",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        skill_root = Path(__file__).resolve().parents[1]
+        policy = _load_policy_module().load_policy(skill_root)
+        batch = args.batch.resolve()
+        state = load_or_create_state(batch, policy)
+        if args.command == "status":
+            result = {"status": state.status, "pending_action": state.pending_action}
+        elif args.command == "next":
+            result = next_action(batch, state, policy)
+        elif args.command == "approve-start":
+            if state.status != "WAITING_START_APPROVAL":
+                raise ValueError("当前状态不允许重复批准启动")
+            approved = _positive_authorization_amount(
+                args.approved_budget, "V01 批准预算"
+            )
+            estimated = _positive_authorization_amount(
+                args.estimated_v01_total, "V01 预计总价"
+            )
+            if estimated > approved:
+                raise ValueError("V01 预计总价必须不超过批准预算")
+            state.approved_budget = str(approved)
+            state.estimated_v01_total = str(estimated)
+            transition(state, "RUNNING_AUTOMATICALLY", reason="V01 总预算已确认")
+            save_state(batch, state)
+            result = next_action(batch, state, policy)
+        elif args.command == "accept-content":
+            consume_model_call(state, policy, video_id=None)
+            result = accept_batch_content(
+                batch, args.content_dir.resolve(), args.profile.resolve()
+            )
+            save_state(batch, state)
+        elif args.command == "accept-image":
+            item = _find_item_dir(batch, args.video_id)
+            consume_model_call(state, policy, video_id=args.video_id)
+            result = accept_web_image(item, args.artifact, args.source)
+            save_state(batch, state)
+        elif args.command == "image-failed":
+            _find_item_dir(batch, args.video_id)
+            consume_model_call(state, policy, video_id=args.video_id)
+            result = record_image_failure(
+                state,
+                video_id=args.video_id,
+                artifact=args.artifact,
+                reason=args.reason,
+            )
+            save_state(batch, state)
+        elif args.command == "run-local":
+            result = run_local_until_gate(batch, state, policy, dry_run=args.dry_run)
+        elif args.command == "approve-rerun":
+            if state.status != "WAITING_RERUN_APPROVAL":
+                raise ValueError("当前状态不允许批准 V02 重跑")
+            rerun_cost = _positive_authorization_amount(
+                args.approved_cost, "V02 批准费用"
+            )
+            workflow = _load_workflow_cli()
+            workflow.start_rerun(batch, args.video_id)
+            state.rerun_budget_by_video[args.video_id] = str(rerun_cost)
+            transition(
+                state,
+                "RUNNING_AUTOMATICALLY",
+                reason=f"{args.video_id} V02 已获授权",
+            )
+            save_state(batch, state)
+            result = next_action(batch, state, policy)
+        elif args.command == "complete-review":
+            if state.status != "WAITING_FINAL_REVIEW":
+                raise ValueError("当前状态不允许完成最终验收")
+            workflow = _load_workflow_cli()
+            workflow.record_review(batch, args.result, args.knowledge_dir)
+            audit = workflow.audit_batch_outputs(batch)
+            if workflow._audit_result_has_errors(audit):
+                transition(state, "BLOCKED", reason="最终七项产出审计失败")
+                result = {"kind": "BLOCKED", "reason": state.blocked_reason}
+            else:
+                transition(
+                    state,
+                    "COMPLETED",
+                    reason="最终视频验收及七项产出审计通过",
+                )
+                result = {"kind": "DONE"}
+            save_state(batch, state)
+        else:
+            raise ValueError(f"未知命令：{args.command}")
+        _print_compact(result)
+        return 0
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        KeyError,
+        InvalidOperation,
+        json.JSONDecodeError,
+    ) as exc:
+        _print_compact({"kind": "BLOCKED", "reason": str(exc)})
+        return 2
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    raise SystemExit(main())

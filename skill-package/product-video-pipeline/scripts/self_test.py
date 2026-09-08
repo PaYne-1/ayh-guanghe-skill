@@ -28,6 +28,9 @@ def main() -> int:
         "references/automatic-learning-rules.md",
         "references/image-generation-routing.md",
         "references/install.md",
+        "pipeline_policy.json",
+        "scripts/pipeline_policy.py",
+        "scripts/pipeline_runner.py",
         "scripts/workflow_cli.py",
         "scripts/autodl_h3.py",
         "scripts/render_cover.py",
@@ -49,6 +52,30 @@ def main() -> int:
     ).stdout
     for command in ("record-issue", "validate-learning", "prepare-node-rules", "start-rerun"):
         assert command in workflow_help
+    runner_help = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=child_environment,
+    ).stdout
+    for command in (
+        "status",
+        "approve-start",
+        "next",
+        "accept-content",
+        "accept-image",
+        "image-failed",
+        "run-local",
+        "approve-rerun",
+        "complete-review",
+    ):
+        assert command in runner_help
     with tempfile.TemporaryDirectory() as temporary:
         temporary_root = Path(temporary)
         batch = temporary_root / "batch"
