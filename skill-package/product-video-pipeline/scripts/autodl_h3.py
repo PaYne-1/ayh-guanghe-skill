@@ -103,6 +103,7 @@ def submit_payload(
     confirm_paid: bool = False,
     workflow_id: str = WORKFLOW_ID,
     timeout: int = 60,
+    response_path: Optional[Path] = None,
 ) -> Dict[str, object]:
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -133,6 +134,8 @@ def submit_payload(
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
     response = _json_request("POST", submit_url, api_key, auth_scheme, api_payload, timeout)
+    if response_path is not None:
+        _write_json(response_path, response)
     return {
         **preview,
         "dry_run": False,

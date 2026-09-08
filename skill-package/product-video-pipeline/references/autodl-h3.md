@@ -37,6 +37,10 @@ AutoDL 可能调整请求字段、鉴权格式和价格。任务开始时必须�
 
 保存最终 payload 为本条 `_工作文件/任务状态/提交请求.json`。请求哈希必须覆盖实际提交 payload；同时保存 `first_frame` 与 `last_frame` 的候选路径、SHA-256、尺寸和结构检查结果。因为服务端字段可能更新，提交前必须以当前工作流页面或同工作流最近成功调用参数核对字段映射，不凭历史字段盲目提交。
 
+自动运行只使用 `pipeline_runner.py` 的动作循环。`approve-start` 从启动 JSON 的 `unit_price_yuan` 或 `prices_by_video` 生成已批准清单，绑定项目 ID/数量、分辨率、固定工作流和各项费用。`next` 在首尾帧有效后构建 data URI payload 并绑定哈希。提交前检查此绑定、剩余预算和 `AUTODL_API_KEY`/`AUTODL_AUTH_SCHEME`，在跨进程锁内持久化费用保留及请求身份后才允许 POST。
+
+费用台账区分 reserved、spent 和 unknown；unknown 仍占用预算。存在已保存 task_id 时只查询原任务，进程中断遗留未知请求时只允许核对，不会自动重复提交。V02 金额必须等于该视频预计价格，并归档 V01 请求、响应、候选及技术证据。
+
 响应缺少 `task_id` 时，错误记录必须包含服务端 `code`、`msg` 和 `request_id`。先到调用日志核对是否已创建任务或扣费；只有日志确认不存在本次任务和消费时，才允许在原授权范围内修正参数并重试。
 
 历史任务中出现的 `minimax_h3_image_audio_to_video_v2_15s` 只作为既有提交证据保留，不得用于新任务、V01 或 V02 提交。

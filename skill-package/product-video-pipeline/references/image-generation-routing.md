@@ -13,9 +13,11 @@ GPT 网页端是唯一生图渠道。分镜首帧、合理尾帧和完整封面�
 1. 读取动作 JSON 中的图片用途、提示词、参考图和目标路径。
 2. 在 GPT 网页端上传所需参考图并提交完整提示词。
 3. 等待生成结束，使用网页提供的原图下载功能保存结果；不得用截图或预览缩略图代替。
-4. 调用 `pipeline_runner.py accept-image` 提交下载文件；随后再次调用 `pipeline_runner.py next`。
+4. 调用 `pipeline_runner.py accept-image --batch "批次目录" --video-id "视频ID" --artifact "图片产出名" --source "原图路径" --action-id "动作ID"` 提交下载文件；随后再次调用 `pipeline_runner.py next`。
 
 网页动作之外不把对话全文、截图分析或完整日志送入 DeepSeek。需要重试时由运行器的失败计数和策略决定，智能体不得自行无限重试。
+
+`IMAGE_FAILURE_RECORDED` 只是失败通知，不是新的生图授权。再次调用 `next` 后，只有获得带新 `action_id` 的 `GPT_WEB_IMAGE_REQUIRED` 才能重试。已接收动作重复回传同一结果不增加次数，恢复中断的已保留动作时不重复点击生成。
 
 ## 请求约束
 

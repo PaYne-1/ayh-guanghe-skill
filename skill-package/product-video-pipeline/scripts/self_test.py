@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import json
+import io
 import importlib.util
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from contextlib import redirect_stdout
+
+from PIL import Image
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -445,6 +449,39 @@ def main() -> int:
         content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
         for phrase in forbidden_phrases:
             assert phrase not in content, f"{relative_path} 仍包含旧条件分支：{phrase}"
+    runner_spec = importlib.util.spec_from_file_location("pipeline_runner", SKILL_ROOT / "scripts/pipeline_runner.py")
+    runner = importlib.util.module_from_spec(runner_spec)
+    runner_spec.loader.exec_module(runner)
+    with tempfile.TemporaryDirectory() as runtime_temporary:
+        batch = Path(runtime_temporary) / "batch"
+        item = batch / "V001_self-test_pending"
+        task_dir = item / "_工作文件/任务状态"
+        task_dir.mkdir(parents=True)
+        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
+        (task_dir / "任务信息.json").write_text(json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8")
+        def invoke(*args):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assert runner.main(list(args)) == 0
+            return json.loads(output.getvalue())
+        action = invoke("approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "3")
+        assert action["kind"] == "BATCH_CONTENT_REQUIRED" and action["action_id"]
+        content_dir = Path(action["output_dir"])
+        (content_dir / "V001.json").write_text(json.dumps(valid_content, ensure_ascii=False), encoding="utf-8")
+        invoke("accept-content", "--batch", str(batch), "--action-id", action["action_id"], "--content-dir", str(content_dir), "--profile", str(SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json"))
+        for color in ("blue", "green", "orange"):
+            action = invoke("next", "--batch", str(batch))
+            assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+            Image.new("RGB", (90, 160), color).save(action["output_path"])
+            invoke("accept-image", "--batch", str(batch), "--video-id", "V001", "--artifact", action["artifact"], "--source", action["output_path"], "--action-id", action["action_id"])
+        assert invoke("next", "--batch", str(batch))["kind"] == "LOCAL_WORK_REQUIRED"
+        before = (batch / runner.STATE_FILENAME).read_bytes()
+        assert invoke("run-local", "--batch", str(batch), "--dry-run")["kind"] == "DRY_RUN_COMPLETE"
+        assert (batch / runner.STATE_FILENAME).read_bytes() == before
+        state = json.loads(before)
+        assert state["model_calls_batch"] == 1 and state["model_calls_by_video"] == {}
+        assert state["image_calls_by_video"] == {"V001": 3}
+        assert state["budget_ledger"] == {}
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 

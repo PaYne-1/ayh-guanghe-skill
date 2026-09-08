@@ -34,6 +34,37 @@ def approve_publish_title(runtime, item: Path, publish_title: str = "出门更�
     return runtime.promote_approved_artifact(item, event)
 
 
+def configure_paid_runner_fixture(runner, batch, item, state):
+    """Use a real approved manifest and payload in network-fake tests."""
+    from test_pipeline_runtime_contract import package
+    policy = load_script("pipeline_policy.py").load_policy(SKILL_ROOT)
+    ids = [p.name.split("_", 1)[0] for p in runner._video_items(batch)]
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": len(ids), "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
+    state.policy_digest = load_script("pipeline_policy.py").policy_digest(policy)
+    state.approved_budget = "10"
+    state.estimated_v01_total = str(len(ids) * 3)
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.manifest_digest = load_script("pipeline_policy.py").policy_digest(state.approved_manifest)
+    content = batch / (item.name[:4] + ".json")
+    content.write_text(json.dumps(package(item.name[:4]), ensure_ascii=False), encoding="utf-8")
+    load_script("workflow_cli.py").save_content_package(item, content, SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json")
+    for artifact, color in (("分镜图.png", "blue"), ("尾帧图.png", "green"), ("封面图.png", "orange")):
+        raw = batch / (item.name[:4] + artifact)
+        Image.new("RGB", (90, 160), color).save(raw)
+        runner.accept_web_image(item, artifact, raw)
+    payload = item / "_工作文件/任务状态/提交请求.json"
+    payload.unlink(missing_ok=True)
+    runner.save_state(batch, state)
+    runner.prepare_payload(batch, item, state)
+
+
+def offline_video_result(runner, item, task_id="offline-task"):
+    candidate = item / "_工作文件/生成过程/视频候选.mp4"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"offline-validated-video")
+    return {"ok": True, "task_id": task_id, "candidate": str(candidate), "technical": {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate)}}
+
+
 def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
     text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "name: product-video-pipeline" in text
@@ -165,10 +196,10 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_autodl_item", offline_autodl)
     result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
 
-    assert result == {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+    assert result["kind"] == "DRY_RUN_COMPLETE"
     assert observed == [True]
     assert state.model_calls_by_video == before_calls
-    assert runner.load_or_create_state(batch, policy).status == "WAITING_FINAL_REVIEW"
+    assert runner.load_or_create_state(batch, policy).status == "RUNNING_AUTOMATICALLY"
     for artifact in ("分镜图.png", "尾帧图.png", "封面图.png"):
         assert (item / artifact).is_file()
 
@@ -1944,12 +1975,13 @@ def test_next_image_action_is_compact_and_web_only(tmp_path):
     process = item / "_工作文件" / "生成过程"
     process.mkdir(parents=True)
     (process / "分镜提示词.txt").write_text("生成轮椅分镜", encoding="utf-8")
+    (process / "策划内容.json").write_text("{}", encoding="utf-8")
     state = runner.RunnerState.new("digest")
     state.status = "RUNNING_AUTOMATICALLY"
 
     action = runner.next_action(batch, state, policy)
 
-    assert action == {
+    assert {k: action[k] for k in ("kind", "video_id", "artifact", "prompt_path", "output_path")} == {
         "kind": "GPT_WEB_IMAGE_REQUIRED",
         "video_id": "V001",
         "artifact": "分镜图.png",
@@ -1968,10 +2000,11 @@ def test_second_image_technical_failure_blocks_the_item():
     second = runner.record_image_failure(
         state, video_id="V001", artifact="分镜图.png", reason="仍然为空"
     )
-    assert first["kind"] == "RETRY_GPT_WEB_IMAGE"
+    assert first["kind"] == "IMAGE_FAILURE_RECORDED"
     assert first["attempt"] == 2
-    assert second["kind"] == "BLOCKED"
-    assert state.status == "BLOCKED"
+    assert second["kind"] == "ITEM_BLOCKED"
+    assert state.status != "BLOCKED"
+    assert state.item_failures["V001"]["kind"] == "image"
 
 
 def test_batch_content_is_accepted_in_one_deterministic_operation(tmp_path, monkeypatch):
@@ -2017,10 +2050,12 @@ def test_runner_poll_and_download_do_not_increment_model_calls(tmp_path, monkeyp
     state.estimated_v01_total = "3.00"
     state.model_calls_by_video["V001"] = 2
 
+    configure_paid_runner_fixture(runner, batch, item, state)
+
     monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: {"task_id": "task-1", "request_hash": "hash-1"})
     monkeypatch.setattr(runner, "_poll_item", lambda *a, **k: {"status": "completed", "url": "https://example.invalid/video.mp4"})
     monkeypatch.setattr(runner, "_download_item", lambda *a, **k: process / "视频候选.mp4")
-    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True, "sha256": "offline-sha", "full_decode": True})
 
     result = runner.run_autodl_item(batch, item, state, api_key="test", dry_run=False)
 
@@ -2049,7 +2084,7 @@ def test_existing_task_id_prevents_second_paid_submit(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(runner, "_download_item", lambda *a, **k: tmp_path / "video.mp4")
-    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True, "sha256": "offline-sha", "full_decode": True})
 
     result = runner.run_autodl_item(batch, item, runner.RunnerState.new("digest"), api_key="test")
 
@@ -2093,7 +2128,7 @@ def test_existing_request_hash_without_task_id_blocks_resubmit(tmp_path, monkeyp
 
     assert result["status"] == "RECONCILIATION_REQUIRED"
     assert result["request_hash"] == "existing-hash"
-    assert state.status == "BLOCKED"
+    assert state.item_failures["V001"]["kind"] == "reconciliation"
 
 
 @pytest.mark.parametrize("outcome", ["timeout", "missing_task_id"])
@@ -2126,6 +2161,7 @@ def test_ambiguous_paid_submit_is_persisted_and_never_submitted_twice(
     state.approved_budget = "10.00"
     state.estimated_v01_total = "3.00"
 
+    configure_paid_runner_fixture(runner, batch, item, state)
     first = runner.run_autodl_item(batch, item, state, api_key="test")
     persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
     second = runner.run_autodl_item(batch, item, state, api_key="test")
@@ -2136,10 +2172,10 @@ def test_ambiguous_paid_submit_is_persisted_and_never_submitted_twice(
     assert persisted["request_hash"] == "stable-hash"
     assert not (state_dir / "任务信息.json.tmp").exists()
     assert calls == [True, False]
-    assert state.status == "BLOCKED"
+    assert state.item_failures["V001"]["kind"] == "reconciliation"
 
 
-def test_task_recording_ambiguity_preserves_task_identity_and_blocks_resume(
+def test_task_recording_ambiguity_preserves_task_identity_and_resumes_get_only(
     tmp_path, monkeypatch
 ):
     runner = load_script("pipeline_runner.py")
@@ -2166,18 +2202,22 @@ def test_task_recording_ambiguity_preserves_task_identity_and_blocks_resume(
         "Workflow", (), {"record_task": staticmethod(fail_record)}
     )
     monkeypatch.setattr(runner, "_submit_item", accepted_submit)
-    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: failing_workflow)
     state = runner.RunnerState.new("digest")
     state.status = "RUNNING_AUTOMATICALLY"
     state.approved_budget = "10.00"
     state.estimated_v01_total = "3.00"
 
+    configure_paid_runner_fixture(runner, batch, item, state)
+    real_workflow = runner._load_workflow_cli()
+    monkeypatch.setattr(real_workflow, "record_task", fail_record)
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: real_workflow)
+    monkeypatch.setattr(runner, "_poll_item", lambda *a, **k: {"status": "poll_timeout"})
     first = runner.run_autodl_item(batch, item, state, api_key="test")
     persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
     second = runner.run_autodl_item(batch, item, state, api_key="test")
 
     assert first["status"] == "RECONCILIATION_REQUIRED"
-    assert second["status"] == "RECONCILIATION_REQUIRED"
+    assert second["status"] == "poll_timeout"
     assert persisted["submission_pending"] is True
     assert persisted["task_id"] == "accepted-task"
     assert persisted["request_id"] == "accepted-request"
@@ -2249,7 +2289,7 @@ def test_runner_uses_batch_confirmation_resolution_for_2k_video(tmp_path, monkey
 
     def validate(path, expected_resolution):
         observed["resolution"] = expected_resolution
-        return {"ok": True}
+        return {"ok": True, "sha256": "offline-sha", "full_decode": True}
 
     monkeypatch.setattr(runner, "validate_video_file", validate)
 
@@ -2270,6 +2310,9 @@ def test_validate_video_file_uses_argument_list_ffprobe_and_returns_compact_resu
     observed = {}
 
     def fake_run(arguments, **kwargs):
+        if arguments[0] == "ffmpeg":
+            observed["decode_arguments"] = arguments
+            return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
         observed["arguments"] = arguments
         observed["kwargs"] = kwargs
         return subprocess.CompletedProcess(
@@ -2309,7 +2352,9 @@ def test_validate_video_file_uses_argument_list_ffprobe_and_returns_compact_resu
     assert result["ok"] is True
     assert result["duration"] == 15.25
     assert result["has_audio"] is True
-    assert set(result) == {"ok", "duration", "width", "height", "has_audio", "sha256"}
+    assert result["full_decode"] is True
+    assert observed["decode_arguments"][0] == "ffmpeg"
+    assert result["candidate"] == str(candidate.resolve())
 
 
 def test_validate_video_file_rejects_missing_audio(tmp_path, monkeypatch):
@@ -2389,7 +2434,7 @@ def test_runner_help_exposes_only_supported_commands():
         assert command in result.stdout
 
 
-def test_run_local_dry_run_stops_at_final_review_and_persists_state(
+def test_run_local_dry_run_preserves_live_progress(
     tmp_path, monkeypatch
 ):
     runner = load_script("pipeline_runner.py")
@@ -2419,11 +2464,11 @@ def test_run_local_dry_run_stops_at_final_review_and_persists_state(
 
     result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
 
-    assert result == {"kind": "USER_FINAL_REVIEW_REQUIRED"}
+    assert result["kind"] == "DRY_RUN_COMPLETE"
     assert state.model_calls_by_video == before_calls
     assert observed == [(batch, item, state, True)]
     restored = runner.load_or_create_state(batch, policy)
-    assert restored.status == "WAITING_FINAL_REVIEW"
+    assert restored.status == "WAITING_START_APPROVAL"
 
 
 def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
@@ -2449,7 +2494,7 @@ def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
     )
 
     assert result.returncode == 2
-    assert json.loads(result.stdout)["kind"] == "BLOCKED"
+    assert json.loads(result.stdout)["kind"] == "COMMAND_REJECTED"
     state = json.loads((batch / "流水线状态.json").read_text(encoding="utf-8"))
     assert state["status"] == "WAITING_START_APPROVAL"
     assert state["approved_budget"] == ""
@@ -2478,12 +2523,15 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
     observed = []
 
+    for item in items:
+        configure_paid_runner_fixture(runner, batch, item, state)
+
     def fake_run(batch_dir, item_dir, runner_state, *, dry_run=False):
         video_id = item_dir.name.split("_", 1)[0]
         observed.append(video_id)
         if video_id == "V001":
             return {"ok": False, "status": "failed", "reason": "provider failed"}
-        return {"ok": True, "task_id": "task-2"}
+        return offline_video_result(runner, item_dir, "task-2")
 
     monkeypatch.setattr(runner, "run_autodl_item", fake_run)
 
@@ -2494,7 +2542,7 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
     assert result["video_ids"] == ["V001"]
     assert state.status == "WAITING_RERUN_APPROVAL"
     assert state.pending_action["video_ids"] == ["V001"]
-    assert "video" in state.completed_nodes["V002"]
+    assert "video:V01" in state.completed_nodes["V002"]
     restored = runner.load_or_create_state(batch, policy)
     assert restored.status == "WAITING_RERUN_APPROVAL"
     assert restored.pending_action["video_ids"] == ["V001"]
@@ -2518,6 +2566,7 @@ def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
         runner.accept_web_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    configure_paid_runner_fixture(runner, batch, item, state)
     monkeypatch.setattr(
         runner,
         "run_autodl_item",
@@ -2826,6 +2875,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     )
     profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
 
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
     assert runner.main(
         [
             "approve-start",
@@ -2857,6 +2907,8 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     ):
         source = tmp_path / artifact
         Image.new("RGB", (1152, 2048), color).save(source)
+        assert runner.main(["next", "--batch", str(batch)]) == 0
+        capsys.readouterr()
         assert runner.main(
             [
                 "accept-image",
@@ -2875,8 +2927,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     candidate = item / "_工作文件" / "生成过程" / "视频候选.mp4"
 
     def fake_video_run(*args, **kwargs):
-        candidate.write_bytes(b"validated-video-candidate")
-        return {"ok": True, "candidate": str(candidate), "technical": {"ok": True}}
+        return offline_video_result(runner, item)
 
     monkeypatch.setattr(runner, "run_autodl_item", fake_video_run)
     assert runner.main(["run-local", "--batch", str(batch)]) == 0
@@ -2929,6 +2980,8 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     assert (item / "发布正文.txt").is_file()
     assert (item / "话题标签.txt").is_file()
     assert (item / f"{package['publish_title']}.mp4").is_file()
+    assert runner._task_info(item)["status"] == "COMPLETED"
+    assert json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))["items"][0]["status"] == "COMPLETED"
 
 
 def test_non_video_promotion_failure_blocks_without_offering_paid_rerun(
@@ -3101,9 +3154,13 @@ def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, 
     policy_module = load_script("pipeline_policy.py")
     policy = policy_module.load_policy(SKILL_ROOT)
     batch = tmp_path / "batch"
-    (batch / "V001_甲_待生成").mkdir(parents=True)
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
     content_dir = tmp_path / "content"
     content_dir.mkdir()
+    state = runner.load_or_create_state(batch, policy)
+    state.status = "RUNNING_AUTOMATICALLY"
+    runner._reserve_action(batch, state, policy, {"kind": "BATCH_CONTENT_REQUIRED", "video_ids": ["V001"], "output_dir": str(content_dir)}, "content_create")
 
     return_code = runner.main(
         [
@@ -3116,13 +3173,14 @@ def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, 
             str(tmp_path / "missing-profile.json"),
         ]
     )
-    assert return_code == 2
-    assert json.loads(capsys.readouterr().out)["kind"] == "BLOCKED"
+    assert return_code == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is False
     restored = runner.load_or_create_state(batch, policy)
     assert restored.model_calls_batch == 1
 
     source = tmp_path / "invalid-square.png"
     Image.new("RGB", (64, 64), "black").save(source)
+    runner._reserve_action(batch, restored, policy, {"kind": "GPT_WEB_IMAGE_REQUIRED", "video_id": "V001", "artifact": "分镜图.png"}, "gpt_web_image")
     return_code = runner.main(
         [
             "accept-image",
@@ -3136,10 +3194,11 @@ def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, 
             str(source),
         ]
     )
-    assert return_code == 2
-    assert json.loads(capsys.readouterr().out)["kind"] == "BLOCKED"
+    assert return_code == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "IMAGE_FAILURE_RECORDED"
     restored = runner.load_or_create_state(batch, policy)
-    assert restored.model_calls_by_video["V001"] == 1
+    assert restored.model_calls_by_video == {}
+    assert restored.image_calls_by_video["V001"] == 1
 
 
 def test_autodl_task_status_is_public_and_tolerates_nested_data():

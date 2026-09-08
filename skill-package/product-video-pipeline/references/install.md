@@ -52,7 +52,7 @@ WorkBuddy 技能同样使用带 YAML frontmatter 的 `SKILL.md`。导入个人�
 
 ## 其他 Agent
 
-无法自动发现 Agent Skills 的平台，可以把 `SKILL.md` 作为系统/专家提示词加载，并保持相对目录结构，让 Agent 按需读取 references。脚本需要 Python 3.9+；首次使用运行：
+无法自动发现 Agent Skills 的平台，可以把 `SKILL.md` 作为系统/专家提示词加载，并保持相对目录结构，让 Agent 按需读取 references。脚本需要 Python 3.9+，真实视频技术检查还需要 PATH 中的 ffmpeg 和 ffprobe；首次使用运行：
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -61,7 +61,7 @@ python scripts/self_test.py
 
 ## 环境变量
 
-安装完成后第一次调用技能，必须先提醒用户接入 AutoDL API。API 未接入时停留在配置步骤，不询问产品文件夹、卖点、数量或预算，也不扫描素材和创建批次。
+第一次调用时先按启动确认单沟通。回复后读取安全环境配置，只有缺少密钥或真实鉴权失败才引导用户配置；付费提交前脚本再次预检密钥和鉴权格式。
 
 ```text
 AUTODL_API_KEY=由安全凭据注入
@@ -70,7 +70,7 @@ AUTODL_AUTH_SCHEME=bearer 或 raw
 
 - 不要让用户在聊天中粘贴完整 API Key；应通过系统环境变量、平台密钥管理或其他不会回显密钥的安全方式配置。
 - 配置完成后先进行不联网、不扣费的 dry-run，再开始产品任务。
-- API 已接入不等于允许付费；每次正式提交仍需用户确认实时价格、预算和费用。
+- API 已接入不等于允许付费；V01 在已批准且绑定的项目费用清单内自动提交，V02 单独批准。
 
 DeepSeek 文本接口的 base_url、模型及密钥通过安全环境配置接入；生图固定使用已登录的 GPT 网页端，不配置第三方生图 API。
 
@@ -80,5 +80,5 @@ DeepSeek 文本接口的 base_url、模型及密钥通过安全环境配置接�
 - 文件写入：产品文件夹的 `生成视频/`、技能包或用户指定 knowledge 目录。
 - 网络访问：只有正式运行 `autodl_h3.py` 时访问启动确认单中核对过的 AutoDL.Art HTTPS 端点；dry-run 不联网。
 - 凭据：只读取环境变量 `AUTODL_API_KEY`，输出和异常不打印密钥。
-- 外部进程：`self_test.py` 只调用同一 Python 解释器；媒体技术验收可由 Agent 另行调用 ffprobe。
+- 外部进程：`self_test.py` 只调用同一 Python 解释器；真实媒体技术检查由运行器调用 ffprobe 和 ffmpeg。
 - 删除行为：脚本不做递归删除，不覆盖已有不同 task_id，不在提交状态不明时自动重提。

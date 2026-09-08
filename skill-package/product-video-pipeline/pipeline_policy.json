@@ -16,7 +16,10 @@
   },
   "model_budget": {
     "per_video": 6,
-    "batch_content_calls": 1
+    "batch_content_calls": 1,
+    "content_correction_calls": 1,
+    "diagnostic_calls": 1,
+    "image_calls_per_video": 6
   },
   "autodl": {
     "workflow_id": "minimax_h3_lightx2v_v5_15s",

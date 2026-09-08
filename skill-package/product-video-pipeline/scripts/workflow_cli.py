@@ -1193,12 +1193,14 @@ def initialize_batch(
     knowledge_dir: Path,
     now: Optional[datetime] = None,
     text_provider: str = "任务开始前确认",
-    image_provider: str = "原生生图优先；无原生能力时使用已确认 API",
+    image_provider: str = "gpt_web",
 ) -> BatchContext:
     if run_mode not in {"learning", "auto"}:
         raise ValueError("运行模式只能是 learning 或 auto")
     if resolution not in {"768P", "2K"}:
         raise ValueError("分辨率只能是 768P 或 2K")
+    if image_provider != "gpt_web":
+        raise ValueError("图片渠道必须固定为 gpt_web")
     try:
         if Decimal(max_budget_yuan) <= 0:
             raise ValueError("本批次最高预算必须大于 0")
@@ -1274,7 +1276,7 @@ def initialize_batch(
         "resolution": resolution,
         "aigc_watermark": False,
         "audio": "MiniMax-H3 原生对白；按人物清单匹配音色；轻微环境声；无 BGM",
-        "image_max_attempts": 3,
+        "image_max_attempts": 2,
         "video_max_reruns": 1,
         "concurrency": 3,
         "poll_interval_seconds": 20,
@@ -1439,6 +1441,12 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     _write_candidate_preserving_previous(item_dir, "分镜提示词.txt", str(package["storyboard_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "合理尾帧提示词.txt", str(package["last_frame_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "视频提示词.txt", str(package["video_prompt"]), now)
+    _write_candidate_preserving_previous(item_dir, "封面标题.txt", str(package["cover_title"]), now)
+    _write_candidate_preserving_previous(
+        item_dir, "封面提示词.txt",
+        "竖屏9:16，2160×3840。参考分镜及产品图保持人物与产品结构，参考风格图生成完整电商封面。"
+        + "准确绘制标题：" + str(package["cover_title"]) + "。不要其他文字。", now,
+    )
     _write_candidate_preserving_previous(item_dir, "发布正文.txt", f"{package['publish_body']}\n", now)
     _write_candidate_preserving_previous(item_dir, "话题标签.txt", " ".join(package["hashtags"]) + "\n", now)
 
