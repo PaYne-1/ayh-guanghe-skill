@@ -173,6 +173,28 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
         assert (item / artifact).is_file()
 
 
+def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.7.0.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        required = {
+            "product-video-pipeline/VERSION",
+            "product-video-pipeline/pipeline_policy.json",
+            "product-video-pipeline/scripts/pipeline_policy.py",
+            "product-video-pipeline/scripts/pipeline_runner.py",
+        }
+        assert required <= names
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.7.0"
+        assert not any(
+            name.endswith(".env")
+            or name.endswith(".pyc")
+            or "__pycache__" in name
+            or "流水线状态.json" in name
+            for name in names
+        )
+
+
 def test_clean_first_level_and_work_file_rules_are_documented():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
