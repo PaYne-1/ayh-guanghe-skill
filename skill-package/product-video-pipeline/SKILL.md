@@ -7,7 +7,7 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 ## Overview
 
-把“产品图片 + 卖点”转成可验收的 15 秒竖屏视频项目。Codex、WorkBuddy、Hermes 或其他能读取 Agent Skills 的智能体均使用同一套文件协议；文本模型负责内容，启动确认明确选择 GPT 网页或第三方 API 图片渠道，便携脚本负责目录、校验、AutoDL 任务记录与验收。
+把“产品图片 + 卖点”转成可验收的 15 秒竖屏视频项目。Codex、WorkBuddy、Hermes 或其他能读取 Agent Skills 的智能体均使用同一套文件协议；文本模型负责内容，GPT 网页负责生图，便携脚本负责目录、校验、AutoDL 任务记录与验收。
 
 ## Trigger contract
 
@@ -19,7 +19,7 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 1. **安全接入 API**：首次启动清单不询问 AutoDL API 接入状态或鉴权方式。用户授权验证后直接读取安全环境配置；`AUTODL_AUTH_SCHEME` 未设置时沿用脚本默认值 `bearer`。只有缺少 `AUTODL_API_KEY`，或鉴权实际失败并导致流程无法继续时，才询问并引导用户安全配置；不得要求用户把完整密钥粘贴到聊天中。
 2. 用户回复启动清单后，完成实时价格与 V01 总预算确认；dry-run 不联网、不扣费，API 可用或 dry-run 通过都不代表付费授权。
 3. 启动时按需读取 [11 节点流程](references/workflow.md)、[内容契约](references/content-contract.md)、[自动复盘与规避规则](references/automatic-learning-rules.md) 及产品配置；详细引用是人工审计文档，运行时不在每个节点反复整篇读入模型上下文。
-4. **图片渠道必须在启动确认时明确选择**：可选 `gpt_web` 或 `third_party_api`。第三方配置仅保存 API 名称、HTTPS 地址、模型、环境变量名及预算字段，绝不保存 API 密钥明文；不进行人工图片审核，也不调用模型进行二次视觉审核。本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
+4. **GPT 网页端是唯一生图渠道**。分镜、尾帧和完整封面均使用网页端生成并下载原图；不进行人工图片审核，也不调用模型进行二次视觉审核。本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
 5. DeepSeek 只用于批次内容创作和异常修复，必须由 `pipeline_policy.json` 的批次/单视频调用计数器限制。生图接收、技术检查、哈希、轮询、下载、晋升、审计和恢复不调用 DeepSeek。
 6. 视频 V01 只能在已批准总预算内提交；失败后 V02 必须取得该视频的单独费用授权，不得提交 V03。最终视频始终由用户人工验收，见 [AutoDL H3](references/autodl-h3.md)、[验收与学习](references/review-learning.md) 和 [交付契约](references/delivery-contract.md)。
 
@@ -35,11 +35,8 @@ python scripts/workflow_cli.py init `
   --product-name "产品名称" `
   --selling-point "卖点一" --selling-point "卖点二" `
   --total 2 --mode learning --resolution 768P `
-  --max-budget 20 --cover-reference-dir "封面图参考文件夹" `
-  --image-provider gpt_web
+  --max-budget 20 --cover-reference-dir "封面图参考文件夹"
 ```
-
-使用第三方 API 时改为 `--image-provider third_party_api --image-api-config "非机密配置 JSON 文件"`；该 JSON 只能包含 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan` 与 `batch_budget_yuan`，密钥只通过 `api_key_env` 指向的环境变量提供。
 
 打开生成的 `启动确认单.json`，向用户一次确认。两种模式的图片节点都不做人工或模型视觉审核，下载结果通过免费技术检查后自动晋升；最终视频都进入批量人工验收。
 
