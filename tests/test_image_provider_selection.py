@@ -317,3 +317,104 @@ def test_each_approved_provider_promotes_images_through_the_shared_accept_path(
     result = json.loads(capsys.readouterr().out)
     assert result["provider"] == provider
     assert (item / "分镜图.png").is_file()
+
+
+def _approved_image_state(setup_batch, provider, api_config_path=None):
+    runner, policy, batch, item = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_provider"] = provider
+    confirmation["image_api_config"] = (
+        json.loads(api_config_path.read_text(encoding="utf-8"))
+        if api_config_path is not None else {}
+    )
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    state = runner.RunnerState.new(runner._load_policy_module().policy_digest(policy))
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.manifest_digest = runner._load_policy_module().policy_digest(state.approved_manifest)
+    runner.save_state(batch, state)
+    return runner, policy, batch, state
+
+
+@pytest.fixture
+def api_batch(setup_batch, api_config_path, monkeypatch):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    return _approved_image_state(setup_batch, "third_party_api", api_config_path)
+
+
+@pytest.fixture
+def web_batch(setup_batch):
+    return _approved_image_state(setup_batch, "gpt_web")
+
+
+def test_third_party_next_reserves_once_and_reuses_action(api_batch):
+    runner, policy, batch, state = api_batch
+    first = runner.next_action(batch, state, policy)
+    second = runner.next_action(batch, state, policy)
+    assert second == first
+    assert state.image_budget_ledger[first["action_id"]]["status"] == "reserved"
+    assert state.image_budget_ledger[first["action_id"]]["cost"] == "0.20"
+    assert len(state.image_budget_ledger) == 1
+
+
+def test_gpt_web_never_touches_image_api_ledger(web_batch):
+    runner, policy, batch, state = web_batch
+    assert runner.next_action(batch, state, policy)["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+    assert state.image_budget_ledger == {}
+
+
+def settle_valid_image(runner, batch, action):
+    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    return runner.main([
+        "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--source", action["output_path"],
+        "--action-id", action["action_id"],
+    ])
+
+
+def test_api_budget_exhaustion_emits_no_new_paid_action(api_batch, capsys):
+    runner, policy, batch, state = api_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_api_config"]["batch_budget_yuan"] = "0.20"
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.manifest_digest = runner._load_policy_module().policy_digest(state.approved_manifest)
+    first = runner.next_action(batch, state, policy)
+    assert settle_valid_image(runner, batch, first) == 0
+    capsys.readouterr()
+    state = runner.load_or_create_state(batch, policy)
+    assert state.image_budget_ledger[first["action_id"]]["status"] == "spent"
+    action = runner.next_action(batch, state, policy)
+    assert action["kind"] == "BLOCKED"
+    assert "图片 API" in action["reason"] and "预算" in action["reason"]
+
+
+@pytest.mark.parametrize(
+    ("submission_state", "expected"),
+    [("not_sent", "released"), ("sent", "spent"), ("unknown", "unknown")],
+)
+def test_third_party_failure_settles_once_by_submission_state(
+    api_batch, capsys, submission_state, expected
+):
+    runner, policy, batch, state = api_batch
+    action = runner.next_action(batch, state, policy)
+    args = [
+        "image-failed", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--reason", "provider failed",
+        "--action-id", action["action_id"], "--submission-state", submission_state,
+    ]
+    assert runner.main(args) == 0
+    settled = runner.load_or_create_state(batch, policy)
+    assert settled.image_budget_ledger[action["action_id"]]["status"] == expected
+    assert runner.main(args) == 0
+    again = runner.load_or_create_state(batch, policy)
+    assert again.image_budget_ledger[action["action_id"]]["status"] == expected
+    if submission_state == "unknown":
+        assert again.status == "BLOCKED"
+        assert action["action_id"] in again.model_actions
+        assert action["action_id"] in again.image_budget_ledger
+        assert runner.next_action(batch, again, policy)["kind"] == "BLOCKED"

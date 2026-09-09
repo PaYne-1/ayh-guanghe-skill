@@ -151,6 +151,7 @@ class RunnerState:
     approved_manifest: dict[str, Any] = field(default_factory=dict)
     manifest_digest: str = ""
     budget_ledger: dict[str, Any] = field(default_factory=dict)
+    image_budget_ledger: dict[str, dict[str, str]] = field(default_factory=dict)
     payload_bindings: dict[str, Any] = field(default_factory=dict)
     model_actions: dict[str, Any] = field(default_factory=dict)
     model_usage: dict[str, int] = field(default_factory=dict)
@@ -182,7 +183,7 @@ def _validate_state(value: object) -> RunnerState:
         mapping = getattr(state, name)
         if not isinstance(mapping, dict) or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in mapping.items()):
             raise ValueError(f"流水线状态计数无效：{name}")
-    for name in ("rerun_budget_by_video", "completed_nodes", "approved_manifest", "budget_ledger", "payload_bindings", "model_actions", "item_failures"):
+    for name in ("rerun_budget_by_video", "completed_nodes", "approved_manifest", "budget_ledger", "image_budget_ledger", "payload_bindings", "model_actions", "item_failures"):
         if not isinstance(getattr(state, name), dict):
             raise ValueError(f"流水线状态字段无效：{name}")
     if any(not isinstance(v, list) or any(not isinstance(n, str) for n in v) for v in state.completed_nodes.values()):
@@ -208,6 +209,18 @@ def _validate_state(value: object) -> RunnerState:
         if not isinstance(row, dict) or row.get("status") not in {"reserved", "spent", "unknown"}:
             raise ValueError("流水线状态费用台账无效")
         _positive_authorization_amount(row.get("cost"), f"状态费用 {key}")
+    for key, row in state.image_budget_ledger.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(row, dict)
+            or row.get("status") not in {"reserved", "spent", "unknown", "released"}
+            or row.get("action_id") != key
+            or row.get("provider") != "third_party_api"
+        ):
+            raise ValueError("流水线状态图片 API 费用台账无效")
+        cost = _positive_authorization_amount(row.get("cost"), f"状态图片 API 费用 {key}")
+        if str(cost) != row.get("cost"):
+            raise ValueError("流水线状态图片 API 费用必须为规范金额")
     return state
 
 
@@ -942,6 +955,20 @@ def _require_running(state: RunnerState) -> None:
         raise PermissionError("当前状态不允许执行或接收新的生成动作")
 
 
+def _store_reserved_action(
+    state: RunnerState, action: dict[str, object], category: str
+) -> dict[str, object]:
+    action = {**action, "action_id": uuid.uuid4().hex}
+    state.model_actions[action["action_id"]] = {
+        **action,
+        "category": category,
+        "status": "reserved",
+        "reserved_at": _now(),
+    }
+    state.pending_action = action
+    return action
+
+
 def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], action: dict[str, object], category: str) -> dict[str, object]:
     pending = state.pending_action or {}
     old = state.model_actions.get(pending.get("action_id"), {})
@@ -968,11 +995,74 @@ def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], 
         state.model_usage[category] = used + 1
         if category == "content_create":
             state.model_calls_batch += 1
-    action = {**action, "action_id": uuid.uuid4().hex}
-    state.model_actions[action["action_id"]] = {**action, "category": category, "status": "reserved", "reserved_at": _now()}
-    state.pending_action = action
+    action = _store_reserved_action(state, action, category)
     save_state(batch, state)
     return action
+
+
+def _reserve_image_api_action(
+    batch: Path, state: RunnerState, action: dict[str, object]
+) -> dict[str, object]:
+    pending = state.pending_action or {}
+    old = state.model_actions.get(pending.get("action_id"), {})
+    if old.get("status") == "reserved":
+        if (
+            old.get("category") == "third_party_image_api"
+            and old.get("video_id") == action.get("video_id")
+            and old.get("artifact") == action.get("artifact")
+        ):
+            return pending
+        raise ValueError("存在未接收的图片 API 动作；必须先恢复或记录该动作失败")
+    config = state.approved_manifest["image_api_config"]
+    unit_price = _positive_authorization_amount(
+        config["unit_price_yuan"], "图片 API 单价"
+    )
+    batch_budget = _positive_authorization_amount(
+        config["batch_budget_yuan"], "图片 API 批次预算"
+    )
+    used = sum(
+        (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
+         if row["status"] in {"reserved", "spent", "unknown"}),
+        Decimal("0"),
+    )
+    if used + unit_price > batch_budget:
+        raise ModelBudgetExceeded("图片 API 批次预算已耗尽")
+    action = {
+        **action,
+        "estimated_cost_yuan": str(unit_price),
+        "remaining_image_budget_yuan": str(batch_budget - used - unit_price),
+    }
+    action = _store_reserved_action(state, action, "third_party_image_api")
+    state.image_budget_ledger[action["action_id"]] = {
+        "action_id": action["action_id"],
+        "provider": "third_party_api",
+        "cost": str(unit_price),
+        "status": "reserved",
+        "at": _now(),
+    }
+    save_state(batch, state)
+    return action
+
+
+def _settle_image_api_action(
+    state: RunnerState, row: dict[str, object], outcome: str
+) -> None:
+    if row.get("provider") != "third_party_api":
+        return
+    ledger = state.image_budget_ledger.get(row["action_id"])
+    if ledger is None:
+        raise ValueError("缺少图片 API 费用保留记录")
+    target = {
+        "accepted": "spent",
+        "not_sent": "released",
+        "sent": "spent",
+        "unknown": "unknown",
+    }[outcome]
+    if ledger["status"] == "reserved":
+        ledger["status"] = target
+        ledger["settled_at"] = _now()
+    elif ledger["status"] != target:
+        raise ValueError("图片 API 费用动作已按不同结果结算")
 
 
 def _action_receipt(
@@ -1195,12 +1285,11 @@ def next_action(
                         state.approved_manifest["image_api_config"]
                     )
                 try:
-                    category = (
-                        "gpt_web_image"
-                        if image_provider == "gpt_web"
-                        else "third_party_api_image"
+                    if image_provider == "third_party_api":
+                        return _reserve_image_api_action(batch_dir, state, action)
+                    return _reserve_action(
+                        batch_dir, state, policy, action, "gpt_web_image"
                     )
-                    return _reserve_action(batch_dir, state, policy, action, category)
                 except ModelBudgetExceeded as exc:
                     state.item_failures[video_id] = {"kind": "image", "reason": str(exc)}
                     break
@@ -1779,6 +1868,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     image_failed.add_argument("--reason", required=True)
     image_failed.add_argument("--action-id")
+    image_failed.add_argument(
+        "--submission-state",
+        choices=("not_sent", "sent", "unknown"),
+        default="unknown",
+    )
     rerun = sub.add_parser("approve-rerun")
     rerun.add_argument("--batch", type=Path, required=True)
     rerun.add_argument("--video-id", required=True)
@@ -1873,7 +1967,13 @@ def _main_locked(args) -> int:
                 result = _finish_action(state, row, digest, result, failed=not result["ok"])
             save_state(batch, state)
         elif args.command == "accept-image":
-            _require_running(state)
+            existing = state.model_actions.get(
+                args.action_id or (state.pending_action or {}).get("action_id")
+            )
+            if state.status not in {"RUNNING_AUTOMATICALLY", "GENERATING"} and (
+                not isinstance(existing, dict) or existing.get("status") == "reserved"
+            ):
+                _require_running(state)
             validate_approved_manifest(batch, state)
             item = _find_item_dir(batch, args.video_id)
             row = _image_action_receipt(state, args.action_id)
@@ -1883,17 +1983,26 @@ def _main_locked(args) -> int:
             if row["status"] != "reserved":
                 result = _finish_action(state, row, digest, {})
             else:
+                _require_running(state)
                 try:
                     result = accept_generated_image(item, args.artifact, args.source)
                     result["provider"] = row["provider"]
                 except (OSError, ValueError, RuntimeError) as exc:
                     result = record_image_failure(state, video_id=args.video_id, artifact=args.artifact, reason=str(exc), retries=policy["image"]["download_retries"])
+                    _settle_image_api_action(state, row, "sent")
                     _finish_action(state, row, digest, result, failed=True)
                 else:
+                    _settle_image_api_action(state, row, "accepted")
                     _finish_action(state, row, digest, result)
             save_state(batch, state)
         elif args.command == "image-failed":
-            _require_running(state)
+            existing = state.model_actions.get(
+                args.action_id or (state.pending_action or {}).get("action_id")
+            )
+            if state.status not in {"RUNNING_AUTOMATICALLY", "GENERATING"} and (
+                not isinstance(existing, dict) or existing.get("status") == "reserved"
+            ):
+                _require_running(state)
             validate_approved_manifest(batch, state)
             _find_item_dir(batch, args.video_id)
             row = _image_action_receipt(state, args.action_id)
@@ -1903,8 +2012,16 @@ def _main_locked(args) -> int:
             if row["status"] != "reserved":
                 result = _finish_action(state, row, digest, {})
             else:
+                _require_running(state)
                 result = record_image_failure(state, video_id=args.video_id, artifact=args.artifact, reason=args.reason, retries=policy["image"]["download_retries"])
+                _settle_image_api_action(state, row, args.submission_state)
                 _finish_action(state, row, digest, result, failed=True)
+                if row.get("provider") == "third_party_api" and args.submission_state == "unknown":
+                    transition(
+                        state,
+                        "BLOCKED",
+                        reason="图片 API 提交状态未知，已停止自动重提",
+                    )
             save_state(batch, state)
         elif args.command == "run-local":
             result = run_local_until_gate(batch, state, policy, dry_run=args.dry_run)
