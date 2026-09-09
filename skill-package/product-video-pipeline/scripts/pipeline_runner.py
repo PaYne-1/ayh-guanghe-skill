@@ -1522,7 +1522,16 @@ def next_action(
         if local_items:
             save_state(batch_dir, state)
             return {"kind": "LOCAL_WORK_REQUIRED", "video_ids": local_items}
-    if state.approved_manifest.get("run_mode") == "auto":
+    if (
+        state.approved_manifest.get("run_mode") == "auto"
+        and any(row.get("kind") in RECOVERABLE_ITEM_KINDS for row in state.item_failures.values())
+    ):
+        save_state(batch_dir, state)
+        return _local_recovery_action(state)
+    if (
+        state.approved_manifest.get("run_mode") == "auto"
+        and all(_item_retry_count(item) == 0 for item in _video_items(batch_dir))
+    ):
         return _deliver_auto_batch(batch_dir, state)
     review = _open_final_review(batch_dir, state)
     if review is not None:
@@ -1814,15 +1823,29 @@ def _deliver_auto_batch(batch: Path, state: RunnerState) -> dict[str, object]:
     if state.approved_manifest.get("run_mode") != "auto":
         raise ValueError("只有已封存的自动模式可以直接交付 V01")
     workflow = _load_workflow_cli()
-    for item in _video_items(batch):
+    items = _video_items(batch)
+    if not items or any(_item_retry_count(item) != 0 for item in items):
+        raise ValueError("自动 V01 交付只允许所有项目均处于首次生成版本")
+    if any(row.get("kind") in RECOVERABLE_ITEM_KINDS for row in state.item_failures.values()):
+        raise ValueError("存在可恢复项目失败时不得进行自动 V01 交付")
+    for item in items:
         if not _has_submission_evidence(item, state):
             raise ValueError(f"{item.name} 缺少 V01 提交证据")
+        _current_technical_evidence(item)
+        process = item / "_工作文件" / "生成过程"
+        for artifact_name in ("标题.txt", "发布正文.txt", "话题标签.txt"):
+            if not (process / artifact_name).is_file():
+                raise ValueError(f"{item.name} 缺少待晋升产出：{artifact_name}")
+        ledger = state.budget_ledger.get(_attempt_key(item))
+        if not isinstance(ledger, dict) or ledger.get("status") != "spent":
+            raise ValueError(f"{item.name} 缺少已结算的 V01 视频费用记录")
+    for item in items:
         _promote_auto_text_outputs(item, workflow)
         _promote_auto_video(item, _current_technical_evidence(item), workflow)
-    rows = [_delivery_row(item, state) for item in _video_items(batch)]
+    rows = [_delivery_row(item, state) for item in items]
     result = {"kind": "V01_DELIVERED", "status": "WAITING_USER_FEEDBACK", "items": rows}
     _atomic_json(batch / "批次V01交付.json", result)
-    for item in _video_items(batch):
+    for item in items:
         info = _task_info(item)
         info.update({"status": "WAITING_USER_FEEDBACK", "v01_delivered_at": _now()})
         _write_task_info(item, info)
@@ -2154,7 +2177,16 @@ def run_local_until_gate(
         return next_action(batch_dir, state, policy)
     if not (state.pending_action or {}).get("action_id"):
         state.pending_action = None
-    if state.approved_manifest.get("run_mode") == "auto":
+    if (
+        state.approved_manifest.get("run_mode") == "auto"
+        and any(row.get("kind") in RECOVERABLE_ITEM_KINDS for row in state.item_failures.values())
+    ):
+        save_state(batch_dir, state)
+        return _local_recovery_action(state)
+    if (
+        state.approved_manifest.get("run_mode") == "auto"
+        and all(_item_retry_count(item) == 0 for item in _video_items(batch_dir))
+    ):
         return _deliver_auto_batch(batch_dir, state)
     review = _open_final_review(batch_dir, state)
     if review is not None:
@@ -2463,6 +2495,21 @@ def _main_locked(args) -> int:
             if _item_retry_count(item) != 0 or not _has_submission_evidence(item, state):
                 raise PermissionError("V02 需要可核对的真实 V01 提交证据；未提交项目必须继续 V01")
             _archive_v01_for_rerun(item)
+            if state.approved_manifest.get("run_mode") == "auto":
+                archived_candidate = (
+                    item / "_工作文件" / "历史版本" / "视频版本" / "V01_初次生成"
+                    / "视频候选.mp4"
+                )
+                if not archived_candidate.is_file():
+                    raise ValueError("V01 候选归档缺失，不能开始 V02")
+                workflow.record_artifact_decision(
+                    item,
+                    "视频.mp4",
+                    archived_candidate,
+                    "revoked",
+                    "v02-approved-rerun",
+                    "用户已明确批准 V02；V01 交付版本保留为历史候选，V02 必须进入最终验收",
+                )
             workflow.start_rerun(batch, args.video_id)
             state.rerun_budget_by_video[args.video_id] = str(rerun_cost)
             state.completed_nodes[args.video_id] = [n for n in state.completed_nodes.get(args.video_id, []) if n != "video" and not n.startswith("video:")]

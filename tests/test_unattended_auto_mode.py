@@ -35,7 +35,7 @@ def auto_batch(tmp_path, monkeypatch):
     (product / "reference.png").write_bytes(b"product reference")
     (covers / "cover.png").write_bytes(b"cover reference")
 
-    def create(provider, total_budget="5.00"):
+    def create(provider, total_budget="5.00", total_videos=1):
         config = None
         if provider == "third_party_api":
             monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "offline-only")
@@ -50,7 +50,7 @@ def auto_batch(tmp_path, monkeypatch):
             product_dir=product,
             product_name="测试产品",
             selling_points=["轻便"],
-            total_videos=1,
+            total_videos=total_videos,
             run_mode="auto",
             resolution="768P",
             max_budget_yuan=total_budget,
@@ -62,7 +62,9 @@ def auto_batch(tmp_path, monkeypatch):
         )
         confirmation_path = context.batch_dir / "启动确认单.json"
         confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
-        confirmation["prices_by_video"] = {"V001": "3.00"}
+        confirmation["prices_by_video"] = {
+            f"V{index:03d}": "3.00" for index in range(1, total_videos + 1)
+        }
         confirmation_path.write_text(
             json.dumps(confirmation, ensure_ascii=False), encoding="utf-8"
         )
@@ -293,3 +295,129 @@ def test_auto_feedback_requires_explicit_v02_budget_without_mutating_ledger(
     assert runner.main([
         "request-rerun", "--batch", str(batch), "--video-id", "V001", "--reason", "禁止 V03"
     ]) == 2
+
+
+def test_auto_v02_success_stays_on_final_review_and_never_rewrites_v01_delivery(
+    auto_batch, capsys, monkeypatch
+):
+    runner, _, batch, item = _drive_auto_v01(auto_batch, "gpt_web", capsys, monkeypatch)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    capsys.readouterr()
+    delivery_before = (batch / "批次V01交付.json").read_bytes()
+    assert runner.main([
+        "request-rerun", "--batch", str(batch), "--video-id", "V001", "--reason", "用户要求调整节奏"
+    ]) == 0
+    capsys.readouterr()
+    assert runner.main([
+        "approve-rerun", "--batch", str(batch), "--video-id", "V001", "--approved-cost", "3.00"
+    ]) == 0
+    capsys.readouterr()
+
+    def execute_v02(batch_dir, item_dir, state, **kwargs):
+        info = runner._task_info(item_dir)
+        info.update({"task_id": "offline-v02", "request_hash": "offline-request-v02", "submission_pending": False})
+        runner._write_task_info(item_dir, info)
+        state.budget_ledger["V001:V02"] = {
+            "cost": "3.00", "status": "spent", "task_id": "offline-v02",
+            "request_hash": "offline-request-v02",
+        }
+        candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+        candidate.write_bytes(b"offline-auto-v02")
+        return {
+            "ok": True, "candidate": str(candidate), "task_id": "offline-v02",
+            "technical": {
+                "ok": True, "full_decode": True, "has_audio": True,
+                "duration": 15.0, "width": 1280, "height": 720,
+                "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve()),
+            },
+        }
+
+    monkeypatch.setattr(runner, "run_autodl_item", execute_v02)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["kind"] == "USER_FINAL_REVIEW_REQUIRED"
+    assert (batch / "批次V01交付.json").read_bytes() == delivery_before
+    assert runner._item_retry_count(item) == 1
+    events = runner._load_workflow_cli().load_approval_events(item)
+    v02_hash = runner._sha256(item / "_工作文件/生成过程/视频候选.mp4")
+    assert not any(
+        event.get("artifact_name") == "视频.mp4"
+        and event.get("confirmed_by") == "initial-auto-v01-authorization"
+        and event.get("sha256") == v02_hash
+        for event in events
+    )
+
+
+def test_auto_mixed_recoverable_failure_waits_without_partial_delivery(
+    auto_batch, capsys, monkeypatch
+):
+    runner, policy, batch, _ = auto_batch("gpt_web", total_budget="10.00", total_videos=2)
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(batch.parent / "unrelated-temp"))
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    content_action = json.loads(capsys.readouterr().out)
+    content_dir = Path(content_action["output_dir"])
+    content_dir.mkdir(parents=True, exist_ok=True)
+    for video_id in ("V001", "V002"):
+        (content_dir / f"{video_id}.json").write_text(
+            json.dumps(package(video_id), ensure_ascii=False), encoding="utf-8"
+        )
+    assert runner.main([
+        "accept-content", "--batch", str(batch), "--content-dir", str(content_dir),
+        "--profile", str(SKILL / "profiles/爱优护电动轮椅_淘宝天猫光合.json"),
+        "--action-id", content_action["action_id"],
+    ]) == 0
+    capsys.readouterr()
+    for index in range(6):
+        assert runner.main(["next", "--batch", str(batch)]) == 0
+        action = json.loads(capsys.readouterr().out)
+        output = Path(action["output_path"])
+        Image.new("RGB", (2160, 3840), (index * 30, 40, 80)).save(output)
+        assert runner.main([
+            "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
+            "--artifact", action["artifact"], "--source", str(output),
+            "--action-id", action["action_id"],
+        ]) == 0
+        capsys.readouterr()
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "LOCAL_WORK_REQUIRED"
+    items = sorted(batch.glob("V???_*"))
+
+    def fail_second(batch_dir, item_dir, state, **kwargs):
+        if item_dir.name.startswith("V002"):
+            raise ValueError("repair local V002 payload dependency")
+        info = runner._task_info(item_dir)
+        info.update({"task_id": "offline-v01", "request_hash": "offline-request", "submission_pending": False})
+        runner._write_task_info(item_dir, info)
+        state.budget_ledger["V001:V01"] = {"cost": "3.00", "status": "spent", "task_id": "offline-v01", "request_hash": "offline-request"}
+        candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+        candidate.write_bytes(b"V001")
+        return {"ok": True, "candidate": str(candidate), "task_id": "offline-v01", "technical": {"ok": True, "full_decode": True, "has_audio": True, "duration": 15.0, "width": 1280, "height": 720, "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve())}}
+
+    monkeypatch.setattr(runner, "run_autodl_item", fail_second)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["kind"] == "LOCAL_WORK_REQUIRED"
+    assert result["video_ids"] == ["V002"]
+    assert not (batch / "批次V01交付.json").exists()
+    workflow = runner._load_workflow_cli()
+    assert workflow.validated_promoted_artifact_path(items[0], "视频.mp4") is None
+    assert not workflow.deliverable_root_path(items[0], "标题.txt").exists()
+    assert runner.load_or_create_state(batch, policy).item_failures["V002"]["kind"] in {
+        "preflight", "payload", "local_retry",
+    }
+
+    def recover_second(batch_dir, item_dir, state, **kwargs):
+        video_id = item_dir.name[:4]
+        info = runner._task_info(item_dir)
+        info.update({"task_id": f"offline-{video_id}", "request_hash": f"request-{video_id}", "submission_pending": False})
+        runner._write_task_info(item_dir, info)
+        state.budget_ledger[f"{video_id}:V01"] = {"cost": "3.00", "status": "spent", "task_id": f"offline-{video_id}", "request_hash": f"request-{video_id}"}
+        candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+        candidate.write_bytes(video_id.encode())
+        return {"ok": True, "candidate": str(candidate), "task_id": f"offline-{video_id}", "technical": {"ok": True, "full_decode": True, "has_audio": True, "duration": 15.0, "width": 1280, "height": 720, "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve())}}
+
+    monkeypatch.setattr(runner, "run_autodl_item", recover_second)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["kind"] == "V01_DELIVERED"
+    assert {row["video_id"] for row in recovered["items"]} == {"V001", "V002"}
