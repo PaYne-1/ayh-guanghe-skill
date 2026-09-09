@@ -218,6 +218,25 @@ def test_approve_start_refuses_missing_image_provider(setup_batch, capsys):
     assert "image-provider" in capsys.readouterr().err
 
 
+def test_third_party_approval_requires_the_named_api_credential(
+    setup_batch, capsys, api_config_path, monkeypatch
+):
+    monkeypatch.delenv("EXAMPLE_IMAGE_API_KEY", raising=False)
+    runner, _, batch, _ = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_provider"] = "third_party_api"
+    confirmation["image_api_config"] = json.loads(api_config_path.read_text(encoding="utf-8"))
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+
+    assert runner.main([
+        "approve-start", "--batch", str(batch), "--approved-budget", "10",
+        "--estimated-v01-total", "3", "--image-provider", "third_party_api",
+        "--image-api-config", str(api_config_path),
+    ]) == 2
+    assert "EXAMPLE_IMAGE_API_KEY" in json.loads(capsys.readouterr().out)["reason"]
+
+
 @pytest.mark.parametrize(
     ("provider", "kind"),
     [("gpt_web", "GPT_WEB_IMAGE_REQUIRED"),
@@ -263,6 +282,22 @@ def test_approved_manifest_rejects_a_later_image_provider_change(
     confirmation["image_provider"] = "third_party_api"
     confirmation["image_api_config"] = json.loads(api_config_path.read_text(encoding="utf-8"))
     confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    state = runner.load_or_create_state(batch, policy)
+    with pytest.raises(PermissionError, match="清单|配置"):
+        runner.validate_approved_manifest(batch, state)
+
+
+def test_approved_manifest_rejects_a_later_api_config_change(
+    setup_batch, capsys, api_config_path, monkeypatch
+):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    approve_and_select_image(setup_batch, capsys, "third_party_api", api_config_path)
+    runner, policy, batch, _ = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_api_config"]["unit_price_yuan"] = "0.21"
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+
     state = runner.load_or_create_state(batch, policy)
     with pytest.raises(PermissionError, match="清单|配置"):
         runner.validate_approved_manifest(batch, state)
@@ -406,6 +441,29 @@ def test_gpt_web_never_touches_image_api_ledger(web_batch):
     assert state.image_budget_ledger == {}
 
 
+def test_old_runner_state_without_image_api_ledger_loads_empty(setup_batch):
+    runner, policy, batch, _ = setup_batch
+    state = runner.RunnerState.new(runner._load_policy_module().policy_digest(policy))
+    runner.save_state(batch, state)
+    state_path = batch / "流水线状态.json"
+    serialized = json.loads(state_path.read_text(encoding="utf-8"))
+    serialized.pop("image_budget_ledger")
+    state_path.write_text(json.dumps(serialized), encoding="utf-8")
+
+    assert runner.load_or_create_state(batch, policy).image_budget_ledger == {}
+
+
+def test_generic_reservation_rejects_third_party_image_category(api_batch):
+    runner, policy, batch, state = api_batch
+
+    with pytest.raises(ValueError, match="third_party_api"):
+        runner._reserve_action(
+            batch, state, policy,
+            {"kind": "THIRD_PARTY_IMAGE_REQUIRED", "video_id": "V001", "artifact": "分镜图.png"},
+            "third_party_api_image",
+        )
+
+
 def settle_valid_image(runner, batch, action):
     Image.new("RGB", (90, 160), "green").save(action["output_path"])
     return runner.main([
@@ -458,3 +516,37 @@ def test_third_party_failure_settles_once_by_submission_state(
         assert action["action_id"] in again.model_actions
         assert action["action_id"] in again.image_budget_ledger
         assert runner.next_action(batch, again, policy)["kind"] == "BLOCKED"
+
+
+def test_third_party_failure_rejects_same_reason_with_contradictory_submission_state(
+    api_batch, capsys
+):
+    runner, policy, batch, state = api_batch
+    action = runner.next_action(batch, state, policy)
+    base_args = [
+        "image-failed", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--reason", "provider failed",
+        "--action-id", action["action_id"],
+    ]
+    assert runner.main([*base_args, "--submission-state", "sent"]) == 0
+    capsys.readouterr()
+
+    assert runner.main([*base_args, "--submission-state", "unknown"]) == 2
+    assert "其他结果" in json.loads(capsys.readouterr().out)["reason"]
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.image_budget_ledger[action["action_id"]]["status"] == "spent"
+
+
+def test_gpt_web_failure_replays_same_reason_across_submission_states(web_batch, capsys):
+    runner, policy, batch, state = web_batch
+    action = runner.next_action(batch, state, policy)
+    base_args = [
+        "image-failed", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--reason", "browser failed",
+        "--action-id", action["action_id"],
+    ]
+    assert runner.main([*base_args, "--submission-state", "sent"]) == 0
+    capsys.readouterr()
+
+    assert runner.main([*base_args, "--submission-state", "unknown"]) == 0
+    assert runner.load_or_create_state(batch, policy).image_budget_ledger == {}

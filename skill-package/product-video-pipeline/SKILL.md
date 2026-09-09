@@ -35,8 +35,11 @@ python scripts/workflow_cli.py init `
   --product-name "产品名称" `
   --selling-point "卖点一" --selling-point "卖点二" `
   --total 2 --mode learning --resolution 768P `
-  --max-budget 20 --cover-reference-dir "封面图参考文件夹"
+  --max-budget 20 --cover-reference-dir "封面图参考文件夹" `
+  --image-provider gpt_web
 ```
+
+选择第三方 API 时，改用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`；该 JSON 只包含已确认的服务、模型、环境变量名、单张价格和批次预算，绝不包含 API 密钥。
 
 打开生成的 `启动确认单.json`，向用户一次确认。两种模式的图片节点都不做人工或模型视觉审核，下载结果通过免费技术检查后自动晋升；最终视频都进入批量人工验收。
 

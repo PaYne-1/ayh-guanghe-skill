@@ -246,6 +246,21 @@ def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details(
     assert "GPT 网页端" in routing and "THIRD_PARTY_IMAGE_REQUIRED" in routing
 
 
+def test_operator_docs_show_required_image_provider_and_failure_settlement_contract():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--image-provider gpt_web" in skill
+    assert "--image-provider third_party_api --image-api-config <非敏感JSON路径>" in skill
+    assert "image-failed --submission-state not_sent|sent|unknown" in routing
+    assert "默认 `unknown`" in routing
+    assert "not_sent" in routing and "释放" in routing
+    assert "sent" in routing and "计入" in routing
+    assert "unknown" in routing and "阻止自动重试" in routing
+
+
 def test_skill_runtime_entry_is_compact_and_runner_driven():
     text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "pipeline_runner.py next" in text

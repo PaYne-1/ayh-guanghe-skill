@@ -984,7 +984,7 @@ def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], 
             raise ModelBudgetExceeded(f"{video_id} GPT 网页图片次数已耗尽")
         state.image_calls_by_video[video_id] = used + 1
     elif category == "third_party_api_image":
-        pass
+        raise ValueError("third_party_api 图片动作必须调用 _reserve_image_api_action")
     else:
         limit_name = {"content_create": "batch_content_calls", "content_correction": "content_correction_calls", "diagnostic": "diagnostic_calls"}[category]
         used = state.model_usage.get(category, 0)
@@ -2008,7 +2008,12 @@ def _main_locked(args) -> int:
             row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:
                 raise ValueError("图片失败与已保留动作不一致")
-            digest = hashlib.sha256(args.reason.encode()).hexdigest()
+            failure_receipt = {"reason": args.reason}
+            if row.get("provider") == "third_party_api":
+                failure_receipt["submission_state"] = args.submission_state
+            digest = hashlib.sha256(
+                json.dumps(failure_receipt, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
             if row["status"] != "reserved":
                 result = _finish_action(state, row, digest, {})
             else:
