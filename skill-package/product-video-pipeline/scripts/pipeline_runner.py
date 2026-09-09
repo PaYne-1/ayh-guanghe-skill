@@ -1074,7 +1074,9 @@ def next_action(
     if state.status == "WAITING_FINAL_REVIEW":
         return state.human_gate or {"kind": "USER_FINAL_REVIEW_REQUIRED", "report_path": str((batch_dir / "批次验收报告.html").resolve())}
     if state.status == "COMPLETED":
-        return {"kind": "DONE"}
+        return _finalize_outputs(batch_dir, state)
+    if (state.human_gate or {}).get("kind") == "LOCAL_OUTPUT_REPAIR_REQUIRED":
+        return state.human_gate
     if state.status == "WAITING_PAID_APPROVAL":
         return {"kind": "USER_START_APPROVAL_REQUIRED"}
     items = _video_items(batch_dir)
@@ -1401,6 +1403,68 @@ def _audit_problem_scope(item: dict[str, object]) -> tuple[set[str], bool]:
     return artifacts, unknown
 
 
+def _finalize_outputs(batch: Path, state: RunnerState) -> dict[str, object]:
+    """The only DONE gate: freshly audit the entire batch, never just reviewed IDs."""
+    workflow = _load_workflow_cli()
+    items = {item.name.split("_", 1)[0]: item for item in _video_items(batch)}
+    expected = set(state.approved_manifest.get("video_ids", items))
+    try:
+        audit = workflow.audit_batch_outputs(batch)
+    except (OSError, ValueError, RuntimeError) as exc:
+        audit = {"items": [], "errors": [{"error": str(exc)}]}
+    audit.update({"checked_at": _now(), "expected_video_ids": sorted(expected)})
+    rows = {Path(row["item_dir"]).name.split("_", 1)[0]: row for row in audit.get("items", [])}
+    problems = {}
+    for video_id in sorted(expected | set(items)):
+        row = rows.get(video_id)
+        if row is None:
+            row = {"item_dir": str(items.get(video_id, "")), "valid": [], "missing": sorted(workflow.DELIVERABLE_NAMES), "errors": [{"error": "批准项目缺少完整交付审计记录"}], "demoted": []}
+        else:
+            row = dict(row)
+            actual_names = {value.get("artifact_name") for value in row.get("valid", [])}
+            errors = list(row.get("errors", []))
+            if not _audit_problem_summary(row) and actual_names != set(workflow.DELIVERABLE_NAMES):
+                errors.append({"error": "审计结果未完整覆盖七项最终产出"})
+            if video_id not in expected:
+                errors.append({"error": "实际项目不在批准清单中"})
+            row["errors"] = errors
+        if audit.get("errors"):
+            row["errors"] = [*row.get("errors", []), *audit["errors"]]
+        if video_id in items and _task_info(items[video_id]).get("status") not in {"COMPLETED", "OUTPUT_REPAIR_REQUIRED"}:
+            row["errors"] = [*row.get("errors", []), {"error": "项目尚无最终验收完成记录"}]
+        if _audit_problem_summary(row):
+            problems[video_id] = {key: row.get(key, []) for key in ("missing", "demoted", "errors")}
+            problems[video_id]["valid_count"] = len(row.get("valid", []))
+    # Preserve every audit, including demotion evidence that later checks no longer see.
+    audit_path = batch / "_交付审计" / (uuid.uuid4().hex + ".json")
+    _atomic_json(audit_path, audit)
+    _atomic_json(batch / "批次交付审计.json", {**audit, "evidence_path": str(audit_path.resolve())})
+    for video_id, item in items.items():
+        info = _task_info(item)
+        if video_id in problems:
+            reason = "整批最终交付审计未通过：" + json.dumps(problems[video_id], ensure_ascii=False, separators=(",", ":"))
+            state.item_failures[video_id] = {"kind": "output_repair", "reason": reason, "audit_path": str(audit_path.resolve())}
+            info.update({"status": "OUTPUT_REPAIR_REQUIRED", "failure_reason": reason})
+        elif state.item_failures.get(video_id, {}).get("kind") == "output_repair":
+            state.item_failures.pop(video_id)
+            info.update({"status": "COMPLETED", "completed_at": _now()})
+            info.pop("failure_reason", None)
+        _write_task_info(item, info)
+        _record_execution(item, "最终交付审计.json", {"audit_path": str(audit_path.resolve()), "checked_at": audit["checked_at"], "issues": problems.get(video_id, {}), "ok": video_id not in problems})
+    if problems or not expected:
+        action = {"kind": "LOCAL_OUTPUT_REPAIR_REQUIRED", "video_ids": sorted(problems),
+                  "items": problems, "audit_path": str(audit_path.resolve()),
+                  "paid_generation_allowed": False, "resume_command": "run-local"}
+        state.human_gate = action
+        transition(state, "RUNNING_AUTOMATICALLY", reason="最终产出需本地恢复，禁止借此重新生成或 V02")
+        save_state(batch, state)
+        return action
+    state.human_gate = None
+    transition(state, "COMPLETED", reason="新鲜整批七项最终产出审计全部通过")
+    save_state(batch, state)
+    return {"kind": "DONE"}
+
+
 def _failed_audit_items(
     batch_dir: Path, audit: dict[str, object], video_ids: Optional[list[str]] = None
 ) -> dict[str, str]:
@@ -1470,6 +1534,9 @@ def run_local_until_gate(
             return next_action(batch_dir, state, policy)
     if (state.pending_action or {}).get("action_id") and state.model_actions.get(state.pending_action["action_id"], {}).get("status") == "reserved":
         return state.pending_action
+    if (state.human_gate or {}).get("kind") == "LOCAL_OUTPUT_REPAIR_REQUIRED":
+        # Delivery repair never enters payload preparation, POST, polling or download.
+        return _finalize_outputs(batch_dir, state)
     items = _video_items(batch_dir)
     if not items:
         return next_action(batch_dir, state, policy)
@@ -1841,8 +1908,7 @@ def _main_locked(args) -> int:
                             info.update({"status": "COMPLETED", "completed_at": _now()})
                             _write_task_info(item, info)
                         if all(_task_info(item).get("status") == "COMPLETED" for item in _video_items(batch)):
-                            transition(state, "COMPLETED", reason="最终视频验收及七项产出审计通过")
-                            result = {"kind": "DONE"}
+                            result = _finalize_outputs(batch, state)
                         else:
                             transition(state, "RUNNING_AUTOMATICALLY", reason="已验收项目完成，其余项目保留原版本继续")
                             result = next_action(batch, state, policy)

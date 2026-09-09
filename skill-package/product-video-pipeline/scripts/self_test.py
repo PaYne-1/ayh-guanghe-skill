@@ -484,6 +484,16 @@ def main() -> int:
         assert state["model_calls_batch"] == 1 and state["model_calls_by_video"] == {}
         assert state["image_calls_by_video"] == {"V001": 3}
         assert state["budget_ledger"] == {}
+        # A stale terminal status cannot bypass a new whole-batch output audit.
+        state["status"] = "COMPLETED"
+        (batch / runner.STATE_FILENAME).write_text(json.dumps(state), encoding="utf-8")
+        runner._write_task_info(item, {**runner._task_info(item), "status": "COMPLETED"})
+        repair = invoke("next", "--batch", str(batch))
+        assert repair["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+        assert repair["paid_generation_allowed"] is False
+        assert "视频.mp4" in repair["items"]["V001"]["missing"]
+        assert invoke("run-local", "--batch", str(batch))["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+        assert json.loads((batch / runner.STATE_FILENAME).read_text(encoding="utf-8"))["budget_ledger"] == {}
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 

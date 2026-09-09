@@ -47,7 +47,7 @@ python scripts/workflow_cli.py init `
 3. `BATCH_CONTENT_REQUIRED` 按 `prompt_path` 为指定 `video_ids` 写入内容 JSON，调用 `accept-content --action-id "动作ID"`。`GPT_WEB_IMAGE_REQUIRED` 按 `reference_paths` 上传参考图并完成一次网页生成/下载，再调用 `pipeline_runner.py accept-image --action-id "动作ID"`。动作在返回前已保留次数；恢复时沿用同一 `action_id`，不得自行重发生成。
 4. 图片不进行人工审核，也不调用模型进行二次视觉审核；技术检查和自动晋升由脚本完成。
 5. `LOCAL_WORK_REQUIRED` 或 `VIDEO_POLL_PENDING` 时执行 `run-local --batch "批次目录"`；脚本顺序生成首尾帧 payload、执行 AutoDL、保存证据并生成报告。若含 `recovery_required`，先修复列明的本地环境问题，再用同一命令恢复原版本/原 task_id，不重新付费。轮询、下载、哈希、晋升、审计和恢复不得调用 DeepSeek。`run-local --dry-run` 只返回 `DRY_RUN_COMPLETE` 预览，不推进真实进度。
-6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
+6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`LOCAL_OUTPUT_REPAIR_REQUIRED` 按 `audit_path` 恢复缺失/损坏的已批准产出，再运行 `run-local`，此分支只审计、不生成、不付费。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
 7. 不得把完整日志粘贴回模型上下文；只读取脚本输出的紧凑 JSON。
 
 默认分别限制批次内容创建 1 次、内容校验修正 1 次、必要异常诊断 1 次；GPT 网页图片单独计数。必要诊断先运行 `reserve-diagnostic --batch "批次目录" --video-id "视频ID" --reason "简短原因"`，按返回动作完成后用 `accept-diagnostic --action-id "动作ID" --result "诊断JSON"` 接收。诊断只记录建议，不扩大付费或重生图授权。
@@ -66,7 +66,7 @@ python scripts/workflow_cli.py init `
 - 每套脚本必须恰好包含老人和一名陪护者或家属两个不同的 `speaker_id`，两人都在画面中真实对话；陪护者身份按脚本确定，不固定为女儿。模型原生音轨必须让两个角色的声音与身份、性别和年龄感匹配且彼此可区分；少角色、同一人包办全部台词、音色不可区分、顺序错误或自问自答时不得通过视频验收。
 - AutoDL 成功返回后立即保存 `task_id`；未知提交状态不得盲目重提。
 - API 整体失效、余额不足、预算超限或必要配置失效才暂停整个批次。
-- 生成完成不等于交付完成。任务只有在七项最终产出审计全部有效后才算完成：视频按发布标题命名并位于一级目录、媒体可解码、`audit-outputs` 无缺失/撤下/错误、任务状态已更新为 `COMPLETED`。
+- 生成完成不等于交付完成。任务只有在七项最终产出审计全部有效后才算完成：视频按发布标题命名并位于一级目录、媒体可解码、`audit-outputs` 无缺失/撤下/错误、任务状态已更新为 `COMPLETED`。每次返回 `DONE` 前，运行器必须重新审计整批所有视频的七项产出，不依赖以前的 `COMPLETED` 标记或仅审计本次验收清单；已完成兄弟项目缺失或损坏时进入本地交付修复，不因此开放 V02。
 
 ## Quick reference
 

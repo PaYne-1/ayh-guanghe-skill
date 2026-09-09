@@ -202,3 +202,82 @@ def test_fabricated_human_gate_does_not_authorize_unsubmitted_v02(setup_batch, c
     assert "真实 V01" in result["reason"]
     assert runner._item_retry_count(items[0]) == 0
     assert (items[0] / "_工作文件/任务状态/提交请求.json").is_file()
+
+
+@pytest.mark.parametrize("damage", ["missing", "tamper", "demote"])
+def test_final_completion_reaudits_previously_completed_sibling(setup_batch, capsys, monkeypatch, damage):
+    env = setup_batch
+    runner, policy, batch, items, _ = env
+    ready(env, capsys)
+    posts = provider(env, monkeypatch)
+    original = runner._submit_item
+
+    def preflight(item, key, dry_run):
+        if item == items[1] and dry_run:
+            raise ValueError("repair before V002 first POST")
+        return original(item, key, dry_run)
+
+    monkeypatch.setattr(runner, "_submit_item", preflight)
+    command(env, capsys, "run-local")
+    assert review(env, capsys, {"V001": "passed"})["kind"] == "LOCAL_WORK_REQUIRED"
+    assert runner._task_info(items[0])["status"] == "COMPLETED"
+    workflow = runner._load_workflow_cli()
+    final = workflow.validated_promoted_artifact_path(items[0], "视频.mp4")
+    original_bytes = final.read_bytes()
+    candidate = items[0] / "_工作文件/生成过程/视频候选.mp4"
+    candidate.unlink()
+    if damage == "missing":
+        final.unlink()
+    elif damage == "tamper":
+        final.write_bytes(b"corrupted-after-prior-completion")
+    else:
+        workflow.record_artifact_decision(items[0], "视频.mp4", final, "failed", "offline-test", "revoked prior approval")
+    monkeypatch.setattr(runner, "_submit_item", original)
+    command(env, capsys, "run-local")
+    result = review(env, capsys, {"V002": "passed"})
+    assert result["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+    assert result["video_ids"] == ["V001"]
+    assert result["paid_generation_allowed"] is False
+    assert "视频.mp4" in json.dumps(result["items"], ensure_ascii=False)
+    audit = json.loads(Path(result["audit_path"]).read_text(encoding="utf-8"))
+    audit_bytes = Path(result["audit_path"]).read_bytes()
+    assert len(audit["items"]) == 2
+    assert len(audit["items"][0]["valid"]) == 6
+    assert len(audit["items"][1]["valid"]) == 7
+    if damage != "missing":
+        assert audit["items"][0]["demoted"]
+    state = runner.load_or_create_state(batch, policy)
+    assert state.status == "RUNNING_AUTOMATICALLY"
+    assert state.item_failures["V001"]["kind"] == "output_repair"
+    assert runner._task_info(items[0])["status"] == "OUTPUT_REPAIR_REQUIRED"
+    assert runner._task_info(items[1])["status"] == "COMPLETED"
+    assert command(env, capsys, "next")["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+    assert command(env, capsys, "run-local")["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+    assert Path(result["audit_path"]).read_bytes() == audit_bytes
+    command(env, capsys, "approve-rerun", "--video-id", "V001", "--approved-cost", "3", expected=2)
+    assert posts == ["V001:V01", "V002:V01"]
+    # Repair only from known approved bytes; no provider call or new generation.
+    candidate.write_bytes(original_bytes)
+    if damage == "demote":
+        event = workflow.record_artifact_decision(items[0], "视频.mp4", candidate, "passed", "offline-test", "explicitly reinstated exact prior bytes")
+    else:
+        event = workflow.latest_artifact_decision(workflow.load_approval_events(items[0]), "视频.mp4", runner._sha256(candidate))
+    workflow.promote_approved_artifact(items[0], event)
+    assert command(env, capsys, "run-local")["kind"] == "DONE"
+    assert posts == ["V001:V01", "V002:V01"]
+    assert runner.load_or_create_state(batch, policy).item_failures == {}
+    assert all(runner._task_info(item)["status"] == "COMPLETED" for item in items)
+
+
+def test_done_response_rechecks_outputs_instead_of_trusting_completed_status(setup_batch, capsys, monkeypatch):
+    runner, policy, batch, items, _ = setup_batch
+    ready(setup_batch, capsys)
+    posts = provider(setup_batch, monkeypatch)
+    command(setup_batch, capsys, "run-local")
+    assert review(setup_batch, capsys, {"V001": "passed", "V002": "passed"})["kind"] == "DONE"
+    (items[0] / "封面图.png").unlink()
+    result = command(setup_batch, capsys, "next")
+    assert result["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
+    assert "封面图.png" in result["items"]["V001"]["missing"]
+    assert runner.load_or_create_state(batch, policy).status != "COMPLETED"
+    assert posts == ["V001:V01", "V002:V01"]
