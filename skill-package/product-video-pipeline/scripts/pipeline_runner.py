@@ -1391,6 +1391,8 @@ def next_action(
             return state.pending_action
     if state.status == "WAITING_RERUN_APPROVAL":
         return state.human_gate or {"kind": "USER_RERUN_APPROVAL_REQUIRED"}
+    if state.status == "WAITING_USER_FEEDBACK":
+        return _load_auto_delivery(batch_dir, state)
     if state.status == "WAITING_FINAL_REVIEW":
         return state.human_gate or {"kind": "USER_FINAL_REVIEW_REQUIRED", "report_path": str((batch_dir / "批次验收报告.html").resolve())}
     if state.status == "COMPLETED":
@@ -1520,6 +1522,8 @@ def next_action(
         if local_items:
             save_state(batch_dir, state)
             return {"kind": "LOCAL_WORK_REQUIRED", "video_ids": local_items}
+    if state.approved_manifest.get("run_mode") == "auto":
+        return _deliver_auto_batch(batch_dir, state)
     review = _open_final_review(batch_dir, state)
     if review is not None:
         return review
@@ -1668,6 +1672,166 @@ def _promote_passed_candidate(
     return workflow.promote_approved_artifact(item_dir, event)
 
 
+def _promote_auto_text_outputs(item_dir: Path, workflow: object) -> None:
+    process = item_dir / "_工作文件" / "生成过程"
+    for artifact_name in ("标题.txt", "发布正文.txt", "话题标签.txt"):
+        _promote_passed_candidate(
+            workflow,
+            item_dir,
+            artifact_name,
+            process / artifact_name,
+            confirmed_by="batch-auto-authorization",
+            feedback="结构化内容契约通过后按批次自动执行授权晋升",
+        )
+
+
+def _current_technical_evidence(item_dir: Path) -> dict[str, object]:
+    evidence_path = item_dir / "_工作文件" / "验收记录" / "视频技术检查.json"
+    if not evidence_path.is_file():
+        raise ValueError("缺少候选绑定的全片技术检查证据")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if not isinstance(evidence, dict):
+        raise ValueError("视频技术检查证据必须是对象")
+    info = _task_info(item_dir)
+    version = f"V{_item_retry_count(item_dir) + 1:02d}"
+    candidate_text = str(evidence.get("candidate") or "").strip()
+    candidate = Path(candidate_text).resolve() if candidate_text else None
+    if (
+        evidence.get("ok") is not True
+        or evidence.get("full_decode") is not True
+        or evidence.get("version") != version
+        or evidence.get("task_id") != info.get("task_id")
+        or candidate is None
+        or not candidate.is_file()
+        or _sha256(candidate) != evidence.get("sha256")
+    ):
+        raise ValueError("技术检查证据与当前候选哈希、版本或任务不一致")
+    try:
+        candidate.relative_to(item_dir.resolve())
+    except ValueError as exc:
+        raise ValueError("视频候选必须位于单条任务目录内") from exc
+    return evidence
+
+
+def _promote_auto_video(
+    item: Path, technical: dict[str, object], workflow: object
+) -> Path:
+    current = _current_technical_evidence(item)
+    if any(
+        technical.get(key) != current.get(key)
+        for key in ("ok", "full_decode", "version", "task_id", "candidate", "sha256")
+    ):
+        raise ValueError("传入技术检查证据不是当前候选证据")
+    candidate = Path(str(current["candidate"])).resolve()
+    return _promote_passed_candidate(
+        workflow,
+        item,
+        "视频.mp4",
+        candidate,
+        confirmed_by="initial-auto-v01-authorization",
+        feedback="V01 已完成确定性技术检查；按首次自动模式授权晋升并等待用户反馈",
+        expected_sha256=str(current["sha256"]),
+    )
+
+
+def _delivery_row(item: Path, state: RunnerState) -> dict[str, object]:
+    workflow = _load_workflow_cli()
+    item = item.resolve()
+    technical = _current_technical_evidence(item)
+    video = workflow.validated_promoted_artifact_path(item, "视频.mp4")
+    expected = workflow.deliverable_root_path(item, "视频.mp4").resolve()
+    if video is None or video.resolve() != expected or not expected.is_file():
+        raise ValueError("缺少已晋升的根目录标题视频")
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        expected.relative_to(temporary_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("交付视频不得位于系统临时目录")
+    if expected.parent != item:
+        raise ValueError("交付视频必须直接位于单条任务根目录")
+    digest = _sha256(expected)
+    if digest != technical["sha256"]:
+        raise ValueError("根目录交付视频与技术检查证据哈希不一致")
+    if technical.get("has_audio") is not True:
+        raise ValueError("技术检查未确认交付视频包含音频")
+    for name in ("duration", "width", "height"):
+        value = technical.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"技术检查缺少有效的 {name} 摘要")
+    video_id = item.name.split("_", 1)[0]
+    ledger = state.budget_ledger.get(_attempt_key(item))
+    if not isinstance(ledger, dict) or ledger.get("status") != "spent":
+        raise ValueError("缺少已结算的 V01 视频费用记录")
+    video_cost = Decimal(str(ledger.get("cost")))
+    if video_cost != Decimal(str(state.approved_manifest["price_by_video"][video_id])):
+        raise ValueError("V01 视频费用记录与批准价格不一致")
+    image_cost = sum(
+        (
+            Decimal(str(row["cost"]))
+            for action_id, row in state.image_budget_ledger.items()
+            if row.get("status") == "spent"
+            and state.model_actions.get(action_id, {}).get("video_id") == video_id
+        ),
+        Decimal("0"),
+    )
+    return {
+        "video_id": video_id,
+        "publish_title": expected.stem,
+        "video_path": str(expected),
+        "item_dir": str(item),
+        "technical": {
+            "ok": True,
+            "duration": technical.get("duration"),
+            "width": technical.get("width"),
+            "height": technical.get("height"),
+            "has_audio": True,
+            "sha256": digest,
+        },
+        "video_cost_yuan": str(video_cost),
+        "image_cost_yuan": str(image_cost),
+        "sha256": digest,
+        "status": "V01 已下载，等待用户反馈",
+    }
+
+
+def _load_auto_delivery(batch: Path, state: RunnerState) -> dict[str, object]:
+    path = batch / "批次V01交付.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("kind") != "V01_DELIVERED" or value.get("status") != "WAITING_USER_FEEDBACK":
+        raise ValueError("批次 V01 交付记录无效")
+    rows = value.get("items")
+    if not isinstance(rows, list):
+        raise ValueError("批次 V01 交付项目必须是列表")
+    current = [_delivery_row(item, state) for item in _video_items(batch)]
+    if rows != current:
+        raise ValueError("批次 V01 交付记录与当前文件、技术证据或费用记录不一致")
+    return {"kind": "V01_DELIVERED", "status": "WAITING_USER_FEEDBACK", "items": current}
+
+
+def _deliver_auto_batch(batch: Path, state: RunnerState) -> dict[str, object]:
+    if state.approved_manifest.get("run_mode") != "auto":
+        raise ValueError("只有已封存的自动模式可以直接交付 V01")
+    workflow = _load_workflow_cli()
+    for item in _video_items(batch):
+        if not _has_submission_evidence(item, state):
+            raise ValueError(f"{item.name} 缺少 V01 提交证据")
+        _promote_auto_text_outputs(item, workflow)
+        _promote_auto_video(item, _current_technical_evidence(item), workflow)
+    rows = [_delivery_row(item, state) for item in _video_items(batch)]
+    result = {"kind": "V01_DELIVERED", "status": "WAITING_USER_FEEDBACK", "items": rows}
+    _atomic_json(batch / "批次V01交付.json", result)
+    for item in _video_items(batch):
+        info = _task_info(item)
+        info.update({"status": "WAITING_USER_FEEDBACK", "v01_delivered_at": _now()})
+        _write_task_info(item, info)
+    state.human_gate = None
+    transition(state, "WAITING_USER_FEEDBACK", reason="V01 技术检查通过，已交付根目录标题视频并等待用户反馈")
+    save_state(batch, state)
+    return result
+
+
 def _promote_passed_review_outputs(
     batch_dir: Path, result_path: Path, workflow: object
 ) -> None:
@@ -1677,21 +1841,10 @@ def _promote_passed_review_outputs(
             raise ValueError("最终验收项目记录必须为对象")
         video_id = str(decision.get("video_id") or "")
         item_dir = _find_item_dir(batch_dir, video_id)
-        process = item_dir / "_工作文件" / "生成过程"
-        for artifact_name in ("标题.txt", "发布正文.txt", "话题标签.txt"):
-            try:
-                _promote_passed_candidate(
-                    workflow,
-                    item_dir,
-                    artifact_name,
-                    process / artifact_name,
-                    confirmed_by="batch-auto-authorization",
-                    feedback="结构化内容契约通过后按批次自动执行授权晋升",
-                )
-            except (OSError, ValueError, RuntimeError, KeyError) as exc:
-                raise ValueError(
-                    f"{video_id} 非视频产出晋升失败（{artifact_name}）：{exc}"
-                ) from exc
+        try:
+            _promote_auto_text_outputs(item_dir, workflow)
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            raise ValueError(f"{video_id} 非视频产出晋升失败：{exc}") from exc
 
         if decision.get("decision") != "passed":
             continue
@@ -2001,6 +2154,8 @@ def run_local_until_gate(
         return next_action(batch_dir, state, policy)
     if not (state.pending_action or {}).get("action_id"):
         state.pending_action = None
+    if state.approved_manifest.get("run_mode") == "auto":
+        return _deliver_auto_batch(batch_dir, state)
     review = _open_final_review(batch_dir, state)
     if review is not None:
         return review
@@ -2080,6 +2235,10 @@ def build_parser() -> argparse.ArgumentParser:
     rerun.add_argument("--batch", type=Path, required=True)
     rerun.add_argument("--video-id", required=True)
     rerun.add_argument("--approved-cost", required=True)
+    feedback = sub.add_parser("request-rerun")
+    feedback.add_argument("--batch", type=Path, required=True)
+    feedback.add_argument("--video-id", required=True)
+    feedback.add_argument("--reason", required=True)
     review = sub.add_parser("complete-review")
     review.add_argument("--batch", type=Path, required=True)
     review.add_argument("--result", type=Path, required=True)
@@ -2254,6 +2413,35 @@ def _main_locked(args) -> int:
                 _atomic_json(Path(row["output_path"]), value)
             result = _finish_action(state, row, digest, {"ok": True, "diagnostic_path": row["output_path"]})
             save_state(batch, state)
+        elif args.command == "request-rerun":
+            if state.status != "WAITING_USER_FEEDBACK":
+                raise ValueError("当前状态不允许请求 V02 重跑")
+            reason = args.reason.strip()
+            if not reason:
+                raise ValueError("V02 重跑反馈不能为空")
+            delivery = _load_auto_delivery(batch, state)
+            if args.video_id not in {row["video_id"] for row in delivery["items"]}:
+                raise ValueError("该视频不在当前 V01 交付记录中")
+            item = _find_item_dir(batch, args.video_id)
+            if _item_retry_count(item) != 0 or not _has_submission_evidence(item, state):
+                raise PermissionError("V02 需要可核对的真实 V01 提交证据，且禁止创建 V03")
+            _record_execution(
+                item,
+                "用户V01反馈.json",
+                {"video_id": args.video_id, "reason": reason, "at": _now(), "version": "V01"},
+            )
+            info = _task_info(item)
+            info.update({"status": "WAITING_RERUN_APPROVAL", "user_feedback": reason})
+            _write_task_info(item, info)
+            action = {
+                "kind": "USER_RERUN_APPROVAL_REQUIRED",
+                "video_ids": [args.video_id],
+                "failures": [{"video_id": args.video_id, "reason": reason}],
+            }
+            state.human_gate = action
+            transition(state, "WAITING_RERUN_APPROVAL", reason=f"{args.video_id} 已记录用户反馈，等待 V02 单独预算授权")
+            save_state(batch, state)
+            result = action
         elif args.command == "approve-rerun":
             if state.status != "WAITING_RERUN_APPROVAL":
                 raise ValueError("当前状态不允许批准 V02 重跑")

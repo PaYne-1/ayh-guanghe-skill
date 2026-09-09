@@ -5,6 +5,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from PIL import Image
+
+from test_pipeline_runtime_contract import package
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,3 +176,120 @@ def test_legacy_confirmation_without_run_mode_keeps_learning_start_gate(auto_bat
     assert runner.next_action(batch, state, policy) == {
         "kind": "USER_START_APPROVAL_REQUIRED"
     }
+
+
+def _drive_auto_v01(auto_batch, provider, capsys, monkeypatch):
+    runner, policy, batch, _ = auto_batch(provider)
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(batch.parent / "unrelated-temp"))
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    content_action = json.loads(capsys.readouterr().out)
+    content_dir = Path(content_action["output_dir"])
+    content_dir.mkdir(parents=True, exist_ok=True)
+    (content_dir / "V001.json").write_text(
+        json.dumps(package("V001"), ensure_ascii=False), encoding="utf-8"
+    )
+    assert runner.main([
+        "accept-content", "--batch", str(batch), "--content-dir", str(content_dir),
+        "--profile", str(SKILL / "profiles/爱优护电动轮椅_淘宝天猫光合.json"),
+        "--action-id", content_action["action_id"],
+    ]) == 0
+    capsys.readouterr()
+    for index in range(3):
+        assert runner.main(["next", "--batch", str(batch)]) == 0
+        image_action = json.loads(capsys.readouterr().out)
+        output = Path(image_action["output_path"])
+        Image.new("RGB", (2160, 3840), (index * 40, 60, 120)).save(output)
+        assert runner.main([
+            "accept-image", "--batch", str(batch), "--video-id", "V001",
+            "--artifact", image_action["artifact"], "--source", str(output),
+            "--action-id", image_action["action_id"],
+        ]) == 0
+        capsys.readouterr()
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "LOCAL_WORK_REQUIRED"
+    item = next(batch.glob("V001_*"))
+
+    def execute(batch_dir, item_dir, state, **kwargs):
+        info = runner._task_info(item_dir)
+        info.update({"task_id": "offline-v01", "request_hash": "offline-request", "submission_pending": False})
+        runner._write_task_info(item_dir, info)
+        state.budget_ledger["V001:V01"] = {
+            "cost": "3.00", "status": "spent", "task_id": "offline-v01",
+            "request_hash": "offline-request",
+        }
+        candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+        candidate.write_bytes(b"offline-auto-v01")
+        technical = {
+            "ok": True, "full_decode": True, "has_audio": True,
+            "duration": 15.0, "width": 1280, "height": 720,
+            "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve()),
+        }
+        return {"ok": True, "candidate": str(candidate), "technical": technical, "task_id": "offline-v01"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", execute)
+    return runner, policy, batch, item
+
+
+@pytest.mark.parametrize("provider", ["gpt_web", "third_party_api"])
+def test_auto_delivery_promotes_v01_and_returns_verified_absolute_root_video(
+    auto_batch, provider, capsys, monkeypatch
+):
+    runner, policy, batch, item = _drive_auto_v01(auto_batch, provider, capsys, monkeypatch)
+
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["kind"] == "V01_DELIVERED"
+    assert result["status"] == "WAITING_USER_FEEDBACK"
+    assert result["kind"] != "USER_FINAL_REVIEW_REQUIRED"
+    row = result["items"][0]
+    workflow = runner._load_workflow_cli()
+    video = Path(row["video_path"])
+    item_path = Path(row["item_dir"])
+    assert video.is_absolute() and video.is_file()
+    assert item_path.is_absolute() and item_path.is_dir()
+    assert item_path == item.resolve()
+    assert video.parent == item_path
+    assert video.name == workflow.deliverable_root_path(item_path, "视频.mp4").name
+    assert runner._sha256(video) == row["sha256"] == row["technical"]["sha256"]
+    assert row["status"] == "V01 已下载，等待用户反馈"
+    assert row["video_cost_yuan"] == "3.00"
+    assert row["image_cost_yuan"] == ("0" if provider == "gpt_web" else "0.60")
+    assert runner.load_or_create_state(batch, policy).status == "WAITING_USER_FEEDBACK"
+    assert (batch / "批次V01交付.json").is_file()
+
+
+def test_auto_feedback_requires_explicit_v02_budget_without_mutating_ledger(
+    auto_batch, capsys, monkeypatch
+):
+    runner, policy, batch, item = _drive_auto_v01(auto_batch, "third_party_api", capsys, monkeypatch)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    capsys.readouterr()
+    delivered = runner.load_or_create_state(batch, policy)
+    ledger_before = json.dumps(delivered.budget_ledger, sort_keys=True)
+    image_ledger_before = json.dumps(delivered.image_budget_ledger, sort_keys=True)
+    actions_before = json.dumps(delivered.model_actions, sort_keys=True)
+
+    assert runner.main([
+        "approve-rerun", "--batch", str(batch), "--video-id", "V001", "--approved-cost", "3.00"
+    ]) == 2
+    assert json.loads(capsys.readouterr().out)["kind"] == "COMMAND_REJECTED"
+    assert runner.main([
+        "request-rerun", "--batch", str(batch), "--video-id", "V001", "--reason", "用户希望调整节奏"
+    ]) == 0
+    request = json.loads(capsys.readouterr().out)
+    assert request["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    waiting = runner.load_or_create_state(batch, policy)
+    assert waiting.status == "WAITING_RERUN_APPROVAL"
+    assert json.dumps(waiting.budget_ledger, sort_keys=True) == ledger_before
+    assert json.dumps(waiting.image_budget_ledger, sort_keys=True) == image_ledger_before
+    assert json.dumps(waiting.model_actions, sort_keys=True) == actions_before
+    assert runner._item_retry_count(item) == 0
+    assert runner.main([
+        "approve-rerun", "--batch", str(batch), "--video-id", "V001", "--approved-cost", "3.00"
+    ]) == 0
+    capsys.readouterr()
+    assert runner._item_retry_count(item) == 1
+    assert runner.main([
+        "request-rerun", "--batch", str(batch), "--video-id", "V001", "--reason", "禁止 V03"
+    ]) == 2
