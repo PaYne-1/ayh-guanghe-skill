@@ -50,7 +50,7 @@ def configure_paid_runner_fixture(runner, batch, item, state):
     load_script("workflow_cli.py").save_content_package(item, content, SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json")
     for artifact, color in (("分镜图.png", "blue"), ("尾帧图.png", "green"), ("封面图.png", "orange")):
         raw = batch / (item.name[:4] + artifact)
-        Image.new("RGB", (90, 160), color).save(raw)
+        Image.new("RGB", (2160, 3840), color).save(raw)
         runner.accept_generated_image(item, artifact, raw)
     payload = item / "_工作文件/任务状态/提交请求.json"
     payload.unlink(missing_ok=True)
@@ -293,7 +293,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
         ("封面图.png", "orange"),
     ):
         raw = tmp_path / artifact
-        Image.new("RGB", (1152, 2048), color).save(raw)
+        Image.new("RGB", (2160, 3840), color).save(raw)
         runner.accept_generated_image(item, artifact, raw)
 
     state = runner.load_or_create_state(batch, policy)
@@ -2019,11 +2019,11 @@ def test_runner_rejects_unknown_state(tmp_path):
         runner.transition(state, "DO_WHATEVER")
 
 
-def test_web_image_is_normalized_and_auto_promoted(tmp_path):
+def test_native_4k_web_image_is_auto_promoted_without_resampling(tmp_path):
     runner = load_script("pipeline_runner.py")
     item = tmp_path / "V001_卖点_待生成"
     raw = tmp_path / "gpt-result.png"
-    Image.new("RGB", (1152, 2048), "navy").save(raw)
+    Image.new("RGB", (2160, 3840), "navy").save(raw)
 
     result = runner.accept_generated_image(item, "分镜图.png", raw)
 
@@ -2038,11 +2038,11 @@ def test_web_image_is_normalized_and_auto_promoted(tmp_path):
     assert events["events"][-1]["confirmed_by"] == "batch-auto-authorization"
 
 
-def test_web_image_rejects_non_nine_sixteen_without_crop(tmp_path):
+def test_web_image_rejects_non_native_dimensions_without_resampling(tmp_path):
     runner = load_script("pipeline_runner.py")
     source = tmp_path / "square.png"
     Image.new("RGB", (1024, 1024), "white").save(source)
-    with pytest.raises(ValueError, match="9:16"):
+    with pytest.raises(ValueError, match="原生2160×3840"):
         runner.normalize_web_image(source, tmp_path / "normalized.png")
 
 
@@ -2050,7 +2050,7 @@ def test_storyboard_and_last_frame_must_have_distinct_hashes(tmp_path):
     runner = load_script("pipeline_runner.py")
     item = tmp_path / "V001_卖点_待生成"
     source = tmp_path / "same.png"
-    Image.new("RGB", (1152, 2048), "green").save(source)
+    Image.new("RGB", (2160, 3840), "green").save(source)
     runner.accept_generated_image(item, "分镜图.png", source)
     with pytest.raises(ValueError, match="尾帧不得与分镜相同"):
         runner.accept_generated_image(item, "尾帧图.png", source)
@@ -2061,8 +2061,8 @@ def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
     item = tmp_path / "V001_卖点_待生成"
     storyboard_source = tmp_path / "storyboard.png"
     last_frame_source = tmp_path / "last-frame.png"
-    Image.new("RGB", (1152, 2048), "navy").save(storyboard_source)
-    Image.new("RGB", (1152, 2048), "green").save(last_frame_source)
+    Image.new("RGB", (2160, 3840), "navy").save(storyboard_source)
+    Image.new("RGB", (2160, 3840), "green").save(last_frame_source)
 
     runner.accept_generated_image(item, "分镜图.png", storyboard_source)
     runner.accept_generated_image(item, "尾帧图.png", last_frame_source)
@@ -2103,6 +2103,12 @@ def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, 
     process.mkdir(parents=True)
     (process / "分镜提示词.txt").write_text("生成轮椅分镜", encoding="utf-8")
     (process / "策划内容.json").write_text("{}", encoding="utf-8")
+    product = tmp_path / "产品参考.png"
+    Image.new("RGB", (64, 64), "navy").save(product)
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"product_images": [str(product)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     state = runner.RunnerState.new("digest")
     state.status = "RUNNING_AUTOMATICALLY"
     image_api_config = (
@@ -2127,12 +2133,15 @@ def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, 
         "kind": kind,
         "video_id": "V001",
         "artifact": "分镜图.png",
-        "prompt_path": str((process / "分镜提示词.txt").resolve()),
+        "prompt_path": str((process / "分镜提交提示词.txt").resolve()),
         "output_path": str((process / "生图原始分镜.png").resolve()),
     }
     assert action["provider"] == provider
+    assert (action["width"], action["height"], action["size"]) == (2160, 3840, "2160x3840")
+    assert action["native_resolution_required"] is True
     if provider == "third_party_api":
         assert action["api_config"] == image_api_config
+        assert action["request_parameters"] == {"width": 2160, "height": 3840}
     else:
         assert "api_config" not in action
     assert "prompt" not in action
@@ -2596,7 +2605,7 @@ def test_run_local_dry_run_preserves_live_progress(
         ("封面图.png", "orange"),
     ):
         source = tmp_path / artifact
-        Image.new("RGB", (1152, 2048), color).save(source)
+        Image.new("RGB", (2160, 3840), color).save(source)
         runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     seal_gpt_web_manifest(runner, batch, state, policy)
@@ -2666,7 +2675,7 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
         artifacts = ("分镜图.png", "尾帧图.png", "封面图.png")
         for artifact, color in zip(artifacts, colors):
             source = tmp_path / f"{item.name}_{artifact}"
-            Image.new("RGB", (1152, 2048), color).save(source)
+            Image.new("RGB", (2160, 3840), color).save(source)
             runner.accept_generated_image(item, artifact, source)
 
     state = runner.load_or_create_state(batch, policy)
@@ -2714,7 +2723,7 @@ def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
         ("封面图.png", "orange"),
     ):
         source = tmp_path / artifact
-        Image.new("RGB", (1152, 2048), color).save(source)
+        Image.new("RGB", (2160, 3840), color).save(source)
         runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
@@ -3067,7 +3076,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
         ("封面图.png", "orange"),
     ):
         source = tmp_path / artifact
-        Image.new("RGB", (1152, 2048), color).save(source)
+        Image.new("RGB", (2160, 3840), color).save(source)
         assert runner.main(["next", "--batch", str(batch)]) == 0
         capsys.readouterr()
         assert runner.main(
@@ -3262,7 +3271,7 @@ def test_failed_video_review_promotes_content_before_requesting_v02(
         ("封面图.png", "orange"),
     ):
         source = tmp_path / artifact
-        Image.new("RGB", (1152, 2048), color).save(source)
+        Image.new("RGB", (2160, 3840), color).save(source)
         runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")

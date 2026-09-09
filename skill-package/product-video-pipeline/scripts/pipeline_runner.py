@@ -128,6 +128,19 @@ def _load_policy_module():
     return module
 
 
+def _load_prompt_contract():
+    """Load the sibling contract module without depending on package installation."""
+    path = Path(__file__).with_name("generation_prompt_contract.py")
+    spec = importlib.util.spec_from_file_location(
+        "product_video_generation_prompt_contract", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 generation_prompt_contract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _state_path(batch_dir: Path) -> Path:
     return batch_dir / STATE_FILENAME
 
@@ -787,7 +800,7 @@ def _persist_video_evidence(item_dir: Path, evidence: dict[str, object]) -> None
     workflow.atomic_write_text(item_dir / "_工作文件/验收记录/自动验收报告.md", summary)
 
 
-def normalize_web_image(
+def validate_native_4k_image(
     source: Path, output: Path, *, width: int = 2160, height: int = 3840
 ) -> dict[str, object]:
     source = Path(source).resolve()
@@ -800,11 +813,11 @@ def normalize_web_image(
         with Image.open(source) as image:
             image.load()
             source_size = image.size
-            if image.width * 16 != image.height * 9:
-                raise ValueError("生成图片结果必须为 9:16，禁止自动裁切或拉伸")
-            normalized = image.convert("RGB").resize(
-                (width, height), Image.Resampling.LANCZOS
-            )
+            if image.size != (width, height):
+                raise ValueError(
+                    f"生成图片必须为原生{width}×{height}，禁止本地放大"
+                )
+            normalized = image.convert("RGB")
             output.parent.mkdir(parents=True, exist_ok=True)
             temporary = output.with_suffix(output.suffix + ".tmp")
             normalized.save(temporary, format="PNG")
@@ -822,7 +835,18 @@ def normalize_web_image(
     }
 
 
-def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> dict[str, object]:
+# Backwards-compatible name for callers outside the runner.  It is now a strict
+# validator; no local resize, crop, or spatial resampling occurs.
+normalize_web_image = validate_native_4k_image
+
+
+def accept_generated_image(
+    item_dir: Path,
+    artifact_name: str,
+    source: Path,
+    *,
+    provider: str = "gpt_web",
+) -> dict[str, object]:
     if artifact_name not in {"分镜图.png", "尾帧图.png", "封面图.png"}:
         raise ValueError(f"不支持的图片产出：{artifact_name}")
     item_dir = Path(item_dir).resolve()
@@ -841,7 +865,7 @@ def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> 
     if raw.resolve() != source:
         raw.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, raw)
-    technical = normalize_web_image(raw, candidate)
+    technical = validate_native_4k_image(raw, candidate)
     _atomic_json(item_dir / "_工作文件/验收记录" / (candidate.stem + "_技术检查.json"), technical)
     _atomic_json(item_dir / "_工作文件/验收记录" / (candidate.stem + "_技术检查_" + technical["source_sha256"][:16] + ".json"), technical)
     if artifact_name == "尾帧图.png":
@@ -865,7 +889,7 @@ def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> 
     promoted = workflow.promote_approved_artifact(item_dir, event)
     return {
         "ok": True,
-        "provider": "gpt_web",
+        "provider": provider,
         "review": "skipped_by_policy",
         "artifact": artifact_name,
         "path": str(promoted.resolve()),
@@ -1270,20 +1294,56 @@ def next_action(
                     state.item_failures[video_id] = {"kind": "content", "reason": f"缺少提示词：{prompt_name}"}
                     missing_content.append(video_id)
                     break
+                references = _reference_paths(batch_dir, item, artifact)
+                compiled_name = {
+                    "分镜图.png": "分镜提交提示词.txt",
+                    "尾帧图.png": "尾帧提交提示词.txt",
+                    "封面图.png": "封面提交提示词.txt",
+                }[artifact]
+                prompt_contract = _load_prompt_contract()
+                try:
+                    compiled_prompt = prompt_contract.compile_image_prompt(
+                        (process / prompt_name).read_text(encoding="utf-8"),
+                        artifact,
+                    )
+                    issues = prompt_contract.validate_image_request(
+                        compiled_prompt, references, 2160, 3840
+                    )
+                    if issues:
+                        raise ValueError(
+                            "图片提交提示词预检失败：" + ",".join(issues)
+                        )
+                    compiled_path = process / compiled_name
+                    workflow.atomic_write_text(compiled_path, compiled_prompt)
+                except (OSError, ValueError) as exc:
+                    reason = str(exc)
+                    state.item_failures[video_id] = {"kind": "content", "reason": reason}
+                    save_state(batch_dir, state)
+                    return {
+                        "kind": "CONTENT_PREFLIGHT_FAILED",
+                        "video_id": video_id,
+                        "artifact": artifact,
+                        "reason": reason,
+                    }
                 action = {
                     "kind": _image_action_kind(image_provider),
                     "provider": image_provider,
                     "video_id": video_id,
                     "artifact": artifact,
-                    "prompt_path": str((process / prompt_name).resolve()),
+                    "prompt_path": str(compiled_path.resolve()),
                     "output_path": str((process / raw_name).resolve()),
-                    "reference_paths": _reference_paths(batch_dir, item, artifact),
+                    "reference_paths": references,
                     "attempt": state.image_failures.get(f"{video_id}:{artifact}", 0) + 1,
+                    "width": 2160,
+                    "height": 3840,
+                    "size": "2160x3840",
+                    "native_resolution_required": True,
                 }
                 if image_provider == "third_party_api":
                     action["api_config"] = dict(
                         state.approved_manifest["image_api_config"]
                     )
+                    action["request_parameters"] = {"width": 2160, "height": 3840}
                 try:
                     if image_provider == "third_party_api":
                         return _reserve_image_api_action(batch_dir, state, action)
@@ -1985,8 +2045,9 @@ def _main_locked(args) -> int:
             else:
                 _require_running(state)
                 try:
-                    result = accept_generated_image(item, args.artifact, args.source)
-                    result["provider"] = row["provider"]
+                    result = accept_generated_image(
+                        item, args.artifact, args.source, provider=str(row["provider"])
+                    )
                 except (OSError, ValueError, RuntimeError) as exc:
                     result = record_image_failure(state, video_id=args.video_id, artifact=args.artifact, reason=str(exc), retries=policy["image"]["download_retries"])
                     _settle_image_api_action(state, row, "sent")

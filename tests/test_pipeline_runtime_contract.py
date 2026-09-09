@@ -88,7 +88,7 @@ def next_image(env, capsys, color="green"):
     action = json.loads(capsys.readouterr().out)
     assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
     output = Path(action["output_path"])
-    Image.new("RGB", (90, 160), color).save(output)
+    Image.new("RGB", (2160, 3840), color).save(output)
     assert runner.main(["accept-image", "--batch", str(batch), "--video-id", action["video_id"], "--artifact", action["artifact"], "--source", str(output), "--action-id", action["action_id"]]) == 0
     capsys.readouterr()
     return action
@@ -308,9 +308,9 @@ def test_idempotent_image_receipt_and_raw_normalized_evidence(setup_batch, capsy
     assert restored.image_calls_by_video == before
     assert restored.model_calls_by_video == {}
     technical = json.loads((items[0] / "_工作文件/验收记录/分镜候选_技术检查.json").read_text(encoding="utf-8"))
-    assert technical["source_size"] == [90, 160]
+    assert technical["source_size"] == [2160, 3840]
     assert technical["target_size"] == [2160, 3840]
-    assert technical["source_sha256"] != technical["sha256"]
+    assert technical["source_size"] == technical["target_size"]
 
 
 def test_failed_image_accept_counts_retry_and_other_item_continues(setup_batch, capsys):

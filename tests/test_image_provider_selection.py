@@ -261,6 +261,62 @@ def test_approved_provider_selects_exact_image_action(
         assert "api_config" not in action
 
 
+@pytest.mark.parametrize(
+    ("provider", "kind"),
+    [("gpt_web", "GPT_WEB_IMAGE_REQUIRED"),
+     ("third_party_api", "THIRD_PARTY_IMAGE_REQUIRED")],
+)
+def test_native_4k_image_action_uses_compiled_prompt_and_exact_dimensions(
+    setup_batch, capsys, provider, kind, api_config_path, monkeypatch
+):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    action = approve_and_select_image(
+        setup_batch, capsys, provider,
+        api_config_path if provider == "third_party_api" else None,
+    )
+
+    assert action["kind"] == kind
+    assert action["width"] == 2160
+    assert action["height"] == 3840
+    assert action["size"] == "2160x3840"
+    assert action["native_resolution_required"] is True
+    assert Path(action["prompt_path"]).name == "分镜提交提示词.txt"
+    prompt = Path(action["prompt_path"]).read_text(encoding="utf-8")
+    assert "【产品参考锁定】" in prompt
+    assert "【原生输出参数】" in prompt
+    assert action["reference_paths"]
+    assert all(Path(path).is_file() for path in action["reference_paths"])
+    if provider == "third_party_api":
+        assert action["request_parameters"] == {"width": 2160, "height": 3840}
+    else:
+        assert "request_parameters" not in action
+
+
+@pytest.mark.parametrize(
+    ("dimensions", "passes"),
+    [((2160, 3840), True), ((1080, 1920), False), ((1152, 2048), False), ((3840, 2160), False)],
+)
+def test_exact_image_dimensions_are_required_without_local_upscale(
+    tmp_path, dimensions, passes
+):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_轻便_待生成"
+    source = tmp_path / f"provider-{dimensions[0]}x{dimensions[1]}.png"
+    Image.new("RGB", dimensions, "green").save(source)
+
+    if passes:
+        result = runner.accept_generated_image(item, "分镜图.png", source)
+        assert result["size"] == [2160, 3840]
+        assert Image.open(item / "分镜图.png").size == (2160, 3840)
+        return
+
+    with pytest.raises(ValueError, match="原生2160×3840|禁止本地放大"):
+        runner.accept_generated_image(item, "分镜图.png", source)
+    candidate = item / "_工作文件" / "生成过程" / "分镜候选.png"
+    assert not candidate.exists()
+    assert not (item / "分镜图.png").exists()
+
+
 def test_third_party_image_action_exposes_key_environment_name_not_secret(
     setup_batch, capsys, api_config_path, monkeypatch
 ):
@@ -318,7 +374,7 @@ def test_runner_rejects_provider_work_after_confirmation_changes(
     if command == "next":
         args = ["next", "--batch", str(batch)]
     elif command == "accept-image":
-        Image.new("RGB", (90, 160), "green").save(action["output_path"])
+        Image.new("RGB", (2160, 3840), "green").save(action["output_path"])
         args = [
             command, "--batch", str(batch), "--video-id", action["video_id"],
             "--artifact", action["artifact"], "--source", action["output_path"],
@@ -343,7 +399,7 @@ def test_each_approved_provider_promotes_images_through_the_shared_accept_path(
         setup_batch, capsys, provider,
         api_config_path if provider == "third_party_api" else None,
     )
-    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    Image.new("RGB", (2160, 3840), "green").save(action["output_path"])
     runner, _, batch, item = setup_batch
     assert runner.main([
         "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
@@ -365,7 +421,7 @@ def test_provider_image_acceptance_uses_neutral_validation_audit_and_raw_evidenc
         api_config_path if provider == "third_party_api" else None,
     )
     assert Path(action["output_path"]).name == "生图原始分镜.png"
-    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    Image.new("RGB", (2160, 3840), "green").save(action["output_path"])
     runner, _, batch, item = setup_batch
     assert runner.main([
         "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
@@ -391,7 +447,7 @@ def test_provider_image_acceptance_uses_neutral_validation_audit_and_raw_evidenc
     ]) == 0
     failure = json.loads(capsys.readouterr().out)
     assert failure["kind"] == "IMAGE_FAILURE_RECORDED"
-    assert "生成图片结果必须为 9:16" in failure["reason"]
+    assert "生成图片必须为原生2160×3840" in failure["reason"]
     assert "GPT 网页" not in failure["reason"]
 
 
@@ -442,6 +498,22 @@ def test_gpt_web_never_touches_image_api_ledger(web_batch):
     assert state.image_budget_ledger == {}
 
 
+def test_image_prompt_preflight_failure_reserves_no_external_action(web_batch):
+    runner, policy, batch, state = web_batch
+    product = Path(json.loads(
+        (batch / "启动确认单.json").read_text(encoding="utf-8")
+    )["product_images"][0])
+    product.unlink()
+
+    action = runner.next_action(batch, state, policy)
+
+    assert action["kind"] == "CONTENT_PREFLIGHT_FAILED"
+    assert action["video_id"] == "V001"
+    assert "图片提交提示词预检失败：image.reference_missing" in action["reason"]
+    assert state.model_actions == {}
+    assert state.pending_action is None
+
+
 def test_old_runner_state_without_image_api_ledger_loads_empty(setup_batch):
     runner, policy, batch, _ = setup_batch
     state = runner.RunnerState.new(runner._load_policy_module().policy_digest(policy))
@@ -466,7 +538,7 @@ def test_generic_reservation_rejects_third_party_image_category(api_batch):
 
 
 def settle_valid_image(runner, batch, action):
-    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    Image.new("RGB", (2160, 3840), "green").save(action["output_path"])
     return runner.main([
         "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
         "--artifact", action["artifact"], "--source", action["output_path"],
