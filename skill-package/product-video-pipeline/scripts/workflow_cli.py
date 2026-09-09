@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
@@ -108,6 +109,16 @@ _APPROVAL_THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _APPROVAL_THREAD_LOCKS_GUARD = threading.Lock()
 _LEARNING_THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _LEARNING_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _load_policy_module():
+    path = Path(__file__).with_name("pipeline_policy.py")
+    spec = importlib.util.spec_from_file_location("product_video_pipeline_policy", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 pipeline_policy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class BatchItem:
@@ -1195,14 +1206,21 @@ def initialize_batch(
     knowledge_dir: Path,
     now: Optional[datetime] = None,
     text_provider: str = "任务开始前确认",
-    image_provider: str = "gpt_web",
+    image_provider: str,
+    image_api_config: object | None = None,
 ) -> BatchContext:
     if run_mode not in {"learning", "auto"}:
         raise ValueError("运行模式只能是 learning 或 auto")
     if resolution not in {"768P", "2K"}:
         raise ValueError("分辨率只能是 768P 或 2K")
-    if image_provider != "gpt_web":
-        raise ValueError("图片渠道必须固定为 gpt_web")
+    policy_module = _load_policy_module()
+    image_provider = policy_module.normalize_image_provider(image_provider)
+    if image_provider == "third_party_api":
+        normalized_image_api = policy_module.normalize_image_api_config(image_api_config)
+    elif image_api_config not in (None, {}):
+        raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+    else:
+        normalized_image_api = {}
     try:
         if Decimal(max_budget_yuan) <= 0:
             raise ValueError("本批次最高预算必须大于 0")
@@ -1271,6 +1289,7 @@ def initialize_batch(
         "run_mode": run_mode,
         "text_provider": text_provider,
         "image_provider": image_provider,
+        "image_api_config": normalized_image_api,
         "cover_reference_dir": str(cover_reference_dir.resolve()),
         "video_provider": "AutoDL.Art MiniMax-H3",
         "duration_seconds": 15,
@@ -1753,6 +1772,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--max-budget", required=True)
     init.add_argument("--cover-reference-dir", type=Path, required=True)
     init.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
+    init.add_argument("--image-provider", choices=("gpt_web", "third_party_api"), required=True)
+    init.add_argument("--image-api-config", type=Path)
 
     validate = subparsers.add_parser("validate-content", help="校验并保存一条结构化策划内容")
     validate.add_argument("--item-dir", type=Path, required=True)
@@ -1853,6 +1874,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_budget_yuan=args.max_budget,
                 cover_reference_dir=args.cover_reference_dir,
                 knowledge_dir=args.knowledge_dir,
+                image_provider=args.image_provider,
+                image_api_config=(
+                    json.loads(args.image_api_config.read_text(encoding="utf-8"))
+                    if args.image_api_config is not None
+                    else None
+                ),
             )
             print(context.batch_dir)
         elif args.command == "validate-content":

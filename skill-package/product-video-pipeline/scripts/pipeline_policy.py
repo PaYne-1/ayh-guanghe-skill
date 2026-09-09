@@ -3,9 +3,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+
+IMAGE_PROVIDERS = ("gpt_web", "third_party_api")
+IMAGE_API_FIELDS = (
+    "api_name", "base_url", "model", "api_key_env",
+    "unit_price_yuan", "batch_budget_yuan",
+)
 
 
 def policy_digest(policy: Mapping[str, object]) -> str:
@@ -18,14 +28,62 @@ def policy_digest(policy: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def positive_amount(value: object, field: str) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} 必须是有效正数金额") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError(f"{field} 必须是有效正数金额")
+    return amount
+
+
+def normalize_image_provider(value: object) -> str:
+    if not isinstance(value, str) or value not in IMAGE_PROVIDERS:
+        raise ValueError("图片渠道必须明确选择 gpt_web 或 third_party_api")
+    return value
+
+
+def normalize_image_api_config(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("third_party_api 图片渠道必须提供 image_api_config")
+    forbidden = {"api_key", "secret", "token", "authorization"} & set(value)
+    if forbidden:
+        raise ValueError("不得在配置中保存 API 密钥明文，只能填写 api_key_env")
+    normalized = {}
+    for key in IMAGE_API_FIELDS[:4]:
+        item = value.get(key)
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"image_api_config 缺少有效字段：{key}")
+        normalized[key] = item.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized["api_key_env"]):
+        raise ValueError("image_api_config.api_key_env 必须是有效的环境变量名")
+    parsed_base_url = urlparse(normalized["base_url"])
+    if (
+        parsed_base_url.scheme != "https"
+        or not parsed_base_url.hostname
+        or parsed_base_url.username is not None
+        or parsed_base_url.password is not None
+        or parsed_base_url.query
+        or parsed_base_url.fragment
+    ):
+        raise ValueError("image_api_config.base_url 必须使用 https://")
+    for key in IMAGE_API_FIELDS[4:]:
+        amount = positive_amount(value.get(key), f"image_api_config.{key}")
+        normalized[key] = str(amount)
+    if Decimal(normalized["unit_price_yuan"]) > Decimal(normalized["batch_budget_yuan"]):
+        raise ValueError("单张价格不能超过图片 API 批次预算")
+    return normalized
+
+
 def load_policy(skill_root: Path) -> dict[str, Any]:
     policy_path = skill_root / "pipeline_policy.json"
     value = json.loads(policy_path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("version") != 1:
         raise ValueError("pipeline_policy.json 版本无效")
     image = value.get("image")
-    if not isinstance(image, dict) or image.get("provider") != "gpt_web":
-        raise ValueError("图片渠道必须固定为 gpt_web")
+    if not isinstance(image, dict) or image.get("allowed_providers") != list(IMAGE_PROVIDERS):
+        raise ValueError("图片渠道规则无效")
     fixed = {"human_review": False, "model_visual_review": False, "target_width": 2160, "target_height": 3840}
     for key, expected in fixed.items():
         if type(image.get(key)) is not type(expected) or image.get(key) != expected:

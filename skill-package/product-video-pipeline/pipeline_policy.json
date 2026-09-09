@@ -1,7 +1,7 @@
 {
   "version": 1,
   "image": {
-    "provider": "gpt_web",
+    "allowed_providers": ["gpt_web", "third_party_api"],
     "human_review": false,
     "model_visual_review": false,
     "target_width": 2160,

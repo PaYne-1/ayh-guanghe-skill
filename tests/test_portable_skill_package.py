@@ -378,6 +378,7 @@ def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp
         cover_reference_dir=cover_refs,
         knowledge_dir=knowledge,
         now=datetime(2026, 8, 26, 12, 0, 0),
+        image_provider="gpt_web",
     )
 
     assert [path.name for path in context.product_images] == ["正侧45度.png"]
@@ -1664,6 +1665,7 @@ def test_initialize_batch_records_matching_formal_rules(tmp_path):
         cover_reference_dir=covers,
         knowledge_dir=knowledge,
         now=datetime(2026, 8, 29, 12, 0, 0),
+        image_provider="gpt_web",
     )
 
     confirmation = json.loads((context.batch_dir / "启动确认单.json").read_text(encoding="utf-8"))
@@ -1824,11 +1826,11 @@ def test_self_test_covers_learning_resources_and_commands():
     assert "start-rerun" in text
 
 
-def test_compact_pipeline_policy_is_versioned_and_web_only():
+def test_compact_pipeline_policy_is_versioned_with_allowed_image_providers():
     policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
     assert policy["version"] == 1
     assert policy["image"] == {
-        "provider": "gpt_web",
+        "allowed_providers": ["gpt_web", "third_party_api"],
         "human_review": False,
         "model_visual_review": False,
         "target_width": 2160,
