@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,31 @@ def test_v01_video_reservation_cannot_exceed_its_sealed_budget(auto_batch, monke
     with pytest.raises(PermissionError, match="V01 视频费用超过已预留视频预算"):
         runner._reserve_payment(batch, item, state, "offline-request")
     assert "V001:V01" not in state.budget_ledger
+
+
+def test_v02_spending_does_not_consume_the_sealed_v01_total_budget(
+    auto_batch, monkeypatch
+):
+    runner, policy, batch, _ = auto_batch("gpt_web")
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    state = runner.load_or_create_state(batch, policy)
+    item = next(batch.glob("V001_*"))
+    state.rerun_budget_by_video["V001"] = "3.00"
+    state.budget_ledger["V001:V02"] = {
+        "cost": "3.00", "status": "spent"
+    }
+    monkeypatch.setattr(runner, "_payload_binding", lambda *_: {"offline": True})
+
+    runner._reserve_payment(batch, item, state, "offline-request")
+
+    v01_total = sum(
+        (Decimal(row["cost"])
+        for attempt, row in state.budget_ledger.items()
+        if attempt.endswith("V01")),
+        Decimal("0"),
+    )
+    assert v01_total == Decimal("3.00")
+    assert v01_total <= Decimal(state.approved_manifest["reserved_v01_video_yuan"])
 
 
 def test_legacy_confirmation_without_run_mode_keeps_learning_start_gate(auto_batch):

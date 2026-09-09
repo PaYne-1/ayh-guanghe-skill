@@ -684,12 +684,13 @@ def _reserve_payment(batch_dir: Path, item_dir: Path, state: RunnerState, reques
         reserved_v01 = Decimal(state.approved_manifest["reserved_v01_video_yuan"])
         if v01_total + cost > reserved_v01:
             raise PermissionError("V01 视频费用超过已预留视频预算")
-        image_total = sum(
+        v01_image_total = sum(
             (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
-             if row["status"] in {"reserved", "spent", "unknown"}),
+             if row["status"] in {"reserved", "spent", "unknown"}
+             and row.get("version", "V01") == "V01"),
             Decimal("0"),
         )
-        if total + image_total + cost > Decimal(state.approved_manifest["total_budget_yuan"]):
+        if v01_total + v01_image_total + cost > Decimal(state.approved_manifest["total_budget_yuan"]):
             raise PermissionError("累计图片和 V01 视频费用超过总预算")
     else:
         limit = Decimal(state.approved_budget) + sum((Decimal(v) for v in state.rerun_budget_by_video.values()), Decimal("0"))
@@ -1157,6 +1158,7 @@ def _reserve_image_api_action(
         "action_id": action["action_id"],
         "provider": "third_party_api",
         "cost": str(unit_price),
+        "version": "V01",
         "status": "reserved",
         "at": _now(),
     }
