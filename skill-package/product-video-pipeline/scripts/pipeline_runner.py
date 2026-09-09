@@ -33,6 +33,7 @@ VALID_STATES = {
     "COMPLETED",
     "BLOCKED",
 }
+IMAGE_ACTION_KINDS = {"GPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED"}
 
 
 @dataclass(frozen=True)
@@ -445,6 +446,16 @@ def _confirmation_manifest(batch_dir: Path) -> dict[str, object]:
     if not path.is_file():
         raise PermissionError("缺少启动确认单和费用清单")
     confirmation = json.loads(path.read_text(encoding="utf-8"))
+    policy_module = _load_policy_module()
+    image_provider = policy_module.normalize_image_provider(confirmation.get("image_provider"))
+    if image_provider == "gpt_web":
+        if confirmation.get("image_api_config") not in (None, {}):
+            raise PermissionError("gpt_web 图片渠道不得携带第三方 API 配置")
+        image_api_config = {}
+    else:
+        image_api_config = policy_module.normalize_image_api_config(
+            confirmation.get("image_api_config")
+        )
     ids = [item.name.split("_", 1)[0] for item in _video_items(batch_dir)]
     if not ids or len(ids) != len(set(ids)) or confirmation.get("total_videos") != len(ids):
         raise PermissionError("启动确认单项目数量/ID与实际批次不一致")
@@ -466,7 +477,36 @@ def _confirmation_manifest(batch_dir: Path) -> dict[str, object]:
         "price_by_video": prices,
         "estimated_v01_total": str(sum((Decimal(p) for p in prices.values()), Decimal("0"))),
         "max_budget_yuan": str(_positive_authorization_amount(confirmation.get("max_budget_yuan"), "启动预算")),
+        "image_provider": image_provider,
+        "image_api_config": image_api_config,
     }
+
+
+def _approved_image_config(
+    confirmation: dict[str, object], provider: str, config_path: Optional[Path]
+) -> tuple[str, dict[str, str]]:
+    policy_module = _load_policy_module()
+    selected = policy_module.normalize_image_provider(provider)
+    declared = policy_module.normalize_image_provider(confirmation.get("image_provider"))
+    if selected != declared:
+        raise PermissionError("批准的图片渠道与启动确认单不一致；切换渠道必须新建批次")
+    if selected == "gpt_web":
+        if config_path is not None or confirmation.get("image_api_config") not in (None, {}):
+            raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+        return selected, {}
+    if config_path is None or not config_path.is_file():
+        raise ValueError("third_party_api 必须提供 --image-api-config")
+    supplied = policy_module.normalize_image_api_config(
+        json.loads(config_path.read_text(encoding="utf-8"))
+    )
+    declared_config = policy_module.normalize_image_api_config(
+        confirmation.get("image_api_config")
+    )
+    if supplied != declared_config:
+        raise PermissionError("图片 API 配置与启动确认单不一致")
+    if not os.environ.get(supplied["api_key_env"]):
+        raise PermissionError(f"缺少图片 API 密钥环境变量：{supplied['api_key_env']}")
+    return selected, supplied
 
 
 def validate_approved_manifest(batch_dir: Path, state: RunnerState) -> None:
@@ -769,7 +809,7 @@ def normalize_web_image(
     }
 
 
-def accept_web_image(item_dir: Path, artifact_name: str, source: Path) -> dict[str, object]:
+def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> dict[str, object]:
     if artifact_name not in {"分镜图.png", "尾帧图.png", "封面图.png"}:
         raise ValueError(f"不支持的图片产出：{artifact_name}")
     item_dir = Path(item_dir).resolve()
@@ -916,6 +956,8 @@ def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], 
         if used >= limits["image_calls_per_video"]:
             raise ModelBudgetExceeded(f"{video_id} GPT 网页图片次数已耗尽")
         state.image_calls_by_video[video_id] = used + 1
+    elif category == "third_party_api_image":
+        pass
     else:
         limit_name = {"content_create": "batch_content_calls", "content_correction": "content_correction_calls", "diagnostic": "diagnostic_calls"}[category]
         used = state.model_usage.get(category, 0)
@@ -933,11 +975,24 @@ def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], 
     return action
 
 
-def _action_receipt(state: RunnerState, action_id: Optional[str], kind: str) -> dict[str, object]:
+def _action_receipt(
+    state: RunnerState, action_id: Optional[str], expected_kind: Optional[str]
+) -> dict[str, object]:
     action_id = action_id or (state.pending_action or {}).get("action_id")
     row = state.model_actions.get(action_id)
-    if not isinstance(row, dict) or row.get("kind") != kind:
+    if not isinstance(row, dict) or (
+        expected_kind is not None and row.get("kind") != expected_kind
+    ):
         raise ValueError("缺少匹配的已保留动作；先调用 next 并使用 action_id")
+    return row
+
+
+def _image_action_receipt(state: RunnerState, action_id: Optional[str]) -> dict[str, object]:
+    row = _action_receipt(state, action_id, expected_kind=None)
+    if row.get("kind") not in IMAGE_ACTION_KINDS:
+        raise ValueError("动作不是可接收的图片生成动作")
+    if row.get("provider") != state.approved_manifest.get("image_provider"):
+        raise PermissionError("图片结果渠道与已批准批次不一致")
     return row
 
 
@@ -969,6 +1024,13 @@ def _reference_paths(batch: Path, item: Path, artifact: str) -> list[str]:
             index = _video_items(batch).index(item)
             refs.append(str(styles[index % len(styles)].resolve()))
     return list(dict.fromkeys(refs))
+
+
+def _image_action_kind(provider: str) -> str:
+    return {
+        "gpt_web": "GPT_WEB_IMAGE_REQUIRED",
+        "third_party_api": "THIRD_PARTY_IMAGE_REQUIRED",
+    }[provider]
 
 
 def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
@@ -1079,6 +1141,22 @@ def next_action(
         return state.human_gate
     if state.status == "WAITING_PAID_APPROVAL":
         return {"kind": "USER_START_APPROVAL_REQUIRED"}
+    try:
+        image_provider = _load_policy_module().normalize_image_provider(
+            state.approved_manifest["image_provider"]
+        )
+        if image_provider == "gpt_web":
+            if state.approved_manifest.get("image_api_config") != {}:
+                raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+        else:
+            _load_policy_module().normalize_image_api_config(
+                state.approved_manifest.get("image_api_config")
+            )
+    except (KeyError, ValueError) as exc:
+        reason = f"启动图片渠道配置无效：{exc}"
+        transition(state, "BLOCKED", reason=reason)
+        save_state(batch_dir, state)
+        return {"kind": "BLOCKED", "reason": reason}
     items = _video_items(batch_dir)
     workflow = _load_workflow_cli()
     missing_content = []
@@ -1102,7 +1180,8 @@ def next_action(
                     missing_content.append(video_id)
                     break
                 action = {
-                    "kind": "GPT_WEB_IMAGE_REQUIRED",
+                    "kind": _image_action_kind(image_provider),
+                    "provider": image_provider,
                     "video_id": video_id,
                     "artifact": artifact,
                     "prompt_path": str((process / prompt_name).resolve()),
@@ -1110,8 +1189,17 @@ def next_action(
                     "reference_paths": _reference_paths(batch_dir, item, artifact),
                     "attempt": state.image_failures.get(f"{video_id}:{artifact}", 0) + 1,
                 }
+                if image_provider == "third_party_api":
+                    action["api_config"] = dict(
+                        state.approved_manifest["image_api_config"]
+                    )
                 try:
-                    return _reserve_action(batch_dir, state, policy, action, "gpt_web_image")
+                    category = (
+                        "gpt_web_image"
+                        if image_provider == "gpt_web"
+                        else "third_party_api_image"
+                    )
+                    return _reserve_action(batch_dir, state, policy, action, category)
                 except ModelBudgetExceeded as exc:
                     state.item_failures[video_id] = {"kind": "image", "reason": str(exc)}
                     break
@@ -1659,6 +1747,12 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--batch", type=Path, required=True)
     approve.add_argument("--approved-budget", required=True)
     approve.add_argument("--estimated-v01-total", required=True)
+    approve.add_argument(
+        "--image-provider",
+        choices=("gpt_web", "third_party_api"),
+        required=True,
+    )
+    approve.add_argument("--image-api-config", type=Path)
     content = sub.add_parser("accept-content")
     content.add_argument("--batch", type=Path, required=True)
     content.add_argument("--content-dir", type=Path, required=True)
@@ -1731,7 +1825,19 @@ def _main_locked(args) -> int:
             )
             if estimated > approved:
                 raise ValueError("V01 预计总价必须不超过批准预算")
+            confirmation_path = batch / "启动确认单.json"
+            if not confirmation_path.is_file():
+                raise PermissionError("缺少启动确认单和费用清单")
+            confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+            image_provider, image_api_config = _approved_image_config(
+                confirmation, args.image_provider, args.image_api_config
+            )
             manifest = _confirmation_manifest(batch)
+            if (
+                manifest["image_provider"] != image_provider
+                or manifest["image_api_config"] != image_api_config
+            ):
+                raise PermissionError("图片渠道配置与启动确认单不一致")
             if estimated != Decimal(str(manifest["estimated_v01_total"])):
                 raise PermissionError("V01 预计总价与逐条费用清单不一致")
             if approved > Decimal(str(manifest["max_budget_yuan"])):
@@ -1768,7 +1874,7 @@ def _main_locked(args) -> int:
         elif args.command == "accept-image":
             _require_running(state)
             item = _find_item_dir(batch, args.video_id)
-            row = _action_receipt(state, args.action_id, "GPT_WEB_IMAGE_REQUIRED")
+            row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:
                 raise ValueError("图片结果与已保留动作不一致")
             digest = _sha256(args.source) if args.source.is_file() else "missing"
@@ -1776,7 +1882,8 @@ def _main_locked(args) -> int:
                 result = _finish_action(state, row, digest, {})
             else:
                 try:
-                    result = accept_web_image(item, args.artifact, args.source)
+                    result = accept_generated_image(item, args.artifact, args.source)
+                    result["provider"] = row["provider"]
                 except (OSError, ValueError, RuntimeError) as exc:
                     result = record_image_failure(state, video_id=args.video_id, artifact=args.artifact, reason=str(exc), retries=policy["image"]["download_retries"])
                     _finish_action(state, row, digest, result, failed=True)
@@ -1786,7 +1893,7 @@ def _main_locked(args) -> int:
         elif args.command == "image-failed":
             _require_running(state)
             _find_item_dir(batch, args.video_id)
-            row = _action_receipt(state, args.action_id, "GPT_WEB_IMAGE_REQUIRED")
+            row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:
                 raise ValueError("图片失败与已保留动作不一致")
             digest = hashlib.sha256(args.reason.encode()).hexdigest()

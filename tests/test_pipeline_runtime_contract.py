@@ -61,14 +61,14 @@ def setup_batch(tmp_path):
     cover.parent.mkdir()
     Image.new("RGB", (90, 160), "red").save(product)
     Image.new("RGB", (90, 160), "blue").save(cover)
-    write(batch / "启动确认单.json", {"product_images": [str(product)], "cover_reference_dir": str(cover.parent), "product_name": "爱优护电动轮椅", "total_videos": 2, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10.00", "unit_price_yuan": "3.00", "live_price": {"queried_at": "2026-09-08"}})
+    write(batch / "启动确认单.json", {"product_images": [str(product)], "cover_reference_dir": str(cover.parent), "product_name": "爱优护电动轮椅", "total_videos": 2, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10.00", "unit_price_yuan": "3.00", "live_price": {"queried_at": "2026-09-08"}, "image_provider": "gpt_web", "image_api_config": {}})
     state = runner.load_or_create_state(batch, policy)
     return runner, policy, batch, items, state
 
 
 def approve(env, capsys):
     runner, policy, batch, items, _ = env
-    assert runner.main(["approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "6"]) == 0
+    assert runner.main(["approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "6", "--image-provider", "gpt_web"]) == 0
     action = json.loads(capsys.readouterr().out)
     return action
 

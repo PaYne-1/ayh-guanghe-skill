@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,3 +144,146 @@ def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
         "--image-provider", "third_party_api",
         "--image-api-config", str(config_path),
     ]) == 0
+
+
+@pytest.fixture
+def api_config_path(tmp_path):
+    config = {
+        "api_name": "Example Images",
+        "base_url": "https://images.example.test/v1",
+        "model": "image-v1",
+        "api_key_env": "EXAMPLE_IMAGE_API_KEY",
+        "unit_price_yuan": "0.20",
+        "batch_budget_yuan": "5.00",
+    }
+    path = tmp_path / "image-api-config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def setup_batch(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    policy = load_script("pipeline_policy.py").load_policy(ROOT / "skill-package" / "product-video-pipeline")
+    batch = tmp_path / "batch"
+    item = batch / "V001_轻便_待生成"
+    task = item / "_工作文件" / "任务状态" / "任务信息.json"
+    task.parent.mkdir(parents=True)
+    task.write_text(json.dumps({"video_id": "V001", "retry_count": 0, "status": "CREATED"}), encoding="utf-8")
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    (process / "策划内容.json").write_text("{}", encoding="utf-8")
+    for prompt in ("分镜提示词.txt", "合理尾帧提示词.txt", "封面提示词.txt"):
+        (process / prompt).write_text("vertical wheelchair product image", encoding="utf-8")
+    product = tmp_path / "product.png"
+    Image.new("RGB", (90, 160), "red").save(product)
+    confirmation = {
+        "product_images": [str(product)], "cover_reference_dir": str(tmp_path),
+        "product_name": "爱优护电动轮椅", "total_videos": 1,
+        "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10.00",
+        "unit_price_yuan": "3.00", "live_price": {"queried_at": "2026-09-08"},
+        "image_provider": "gpt_web", "image_api_config": {},
+    }
+    (batch / "启动确认单.json").write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    return runner, policy, batch, item
+
+
+def approve_and_select_image(setup_batch, capsys, provider, api_config_path=None):
+    runner, _, batch, _ = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_provider"] = provider
+    confirmation["image_api_config"] = (
+        json.loads(api_config_path.read_text(encoding="utf-8"))
+        if api_config_path is not None else {}
+    )
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    args = [
+        "approve-start", "--batch", str(batch), "--approved-budget", "10",
+        "--estimated-v01-total", "3", "--image-provider", provider,
+    ]
+    if api_config_path is not None:
+        args.extend(["--image-api-config", str(api_config_path)])
+    assert runner.main(args) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_approve_start_refuses_missing_image_provider(setup_batch, capsys):
+    runner, _, batch, _ = setup_batch
+    with pytest.raises(SystemExit):
+        runner.main([
+            "approve-start", "--batch", str(batch),
+            "--approved-budget", "10", "--estimated-v01-total", "3",
+        ])
+    assert "image-provider" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("provider", "kind"),
+    [("gpt_web", "GPT_WEB_IMAGE_REQUIRED"),
+     ("third_party_api", "THIRD_PARTY_IMAGE_REQUIRED")],
+)
+def test_approved_provider_selects_exact_image_action(
+    setup_batch, capsys, provider, kind, api_config_path, monkeypatch
+):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    action = approve_and_select_image(
+        setup_batch, capsys, provider,
+        api_config_path if provider == "third_party_api" else None,
+    )
+    assert action["kind"] == kind
+    assert action["provider"] == provider
+    assert action["action_id"]
+    assert {"video_id", "artifact", "prompt_path", "output_path", "reference_paths", "attempt"} <= set(action)
+    if provider == "third_party_api":
+        assert action["api_config"]["api_key_env"] == "EXAMPLE_IMAGE_API_KEY"
+    else:
+        assert "api_config" not in action
+
+
+def test_third_party_image_action_exposes_key_environment_name_not_secret(
+    setup_batch, capsys, api_config_path, monkeypatch
+):
+    secret = "provider-selection-test-secret"
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", secret)
+    action = approve_and_select_image(setup_batch, capsys, "third_party_api", api_config_path)
+    assert action["api_config"]["api_key_env"] == "EXAMPLE_IMAGE_API_KEY"
+    assert secret not in json.dumps(action)
+    _, _, batch, _ = setup_batch
+    assert secret not in (batch / "流水线状态.json").read_text(encoding="utf-8")
+
+
+def test_approved_manifest_rejects_a_later_image_provider_change(
+    setup_batch, capsys, api_config_path
+):
+    approve_and_select_image(setup_batch, capsys, "gpt_web")
+    runner, policy, batch, _ = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_provider"] = "third_party_api"
+    confirmation["image_api_config"] = json.loads(api_config_path.read_text(encoding="utf-8"))
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    state = runner.load_or_create_state(batch, policy)
+    with pytest.raises(PermissionError, match="清单|配置"):
+        runner.validate_approved_manifest(batch, state)
+
+
+@pytest.mark.parametrize("provider", ["gpt_web", "third_party_api"])
+def test_each_approved_provider_promotes_images_through_the_shared_accept_path(
+    setup_batch, capsys, provider, api_config_path, monkeypatch
+):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    action = approve_and_select_image(
+        setup_batch, capsys, provider,
+        api_config_path if provider == "third_party_api" else None,
+    )
+    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    runner, _, batch, item = setup_batch
+    assert runner.main([
+        "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--source", action["output_path"],
+        "--action-id", action["action_id"],
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["provider"] == provider
+    assert (item / "分镜图.png").is_file()
