@@ -48,6 +48,19 @@ def test_specific_product_appearance_is_rejected(contract, appearance):
         )
 
 
+@pytest.mark.parametrize(
+    "scene",
+    [
+        "老人手放控制器上，自然向家属说明操作。",
+        "始终保持扶手结构一致，不要改变靠背。",
+    ],
+)
+def test_component_action_or_reference_lock_is_not_product_appearance_description(
+    contract, scene
+):
+    assert contract.compile_image_prompt(scene, "分镜图.png").startswith(scene)
+
+
 def test_image_contract_allows_safe_area_composition_without_product_inference(contract):
     prompt = contract.compile_image_prompt(
         "产品整体始终完整位于画面安全区，老人和家属自然同行", "尾帧图.png"
@@ -211,6 +224,19 @@ def test_video_validator_rejects_extra_voice_permission(contract, people, segmen
 def test_video_contract_rejects_inferred_appearance(contract, people, segments):
     with pytest.raises(ValueError, match="产品外观"):
         contract.compile_video_prompt("红色车架在阳光下行驶", people, segments)
+
+
+@pytest.mark.parametrize(
+    "scene",
+    [
+        "老人手放控制器上，自然向家属说明操作。",
+        "始终保持扶手结构一致，不要改变靠背。",
+    ],
+)
+def test_video_contract_allows_component_action_and_reference_lock(
+    contract, people, segments, scene
+):
+    assert contract.compile_video_prompt(scene, people, segments).startswith(scene)
 
 
 def test_video_contract_requires_two_distinct_people_and_ordered_non_overlapping_segments(

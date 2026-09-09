@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Mapping, Sequence
 
 
@@ -27,6 +28,43 @@ EXTRA_VOICE_PERMISSION_TERMS = (
     "允许背景音乐",
     "允许BGM",
     "允许哼声",
+)
+
+APPEARANCE_DESCRIPTION_TERMS = (
+    "黑色",
+    "白色",
+    "红色",
+    "蓝色",
+    "灰色",
+    "银色",
+    "金色",
+    "圆形",
+    "方形",
+    "流线型",
+    "弧形",
+    "加粗",
+    "加宽",
+    "加长",
+    "加厚",
+    "真皮",
+    "皮质",
+    "金属",
+    "塑料",
+    "铝合金",
+    "碳纤维",
+    "加装",
+    "新增",
+    "增加",
+    "删减",
+    "删除",
+    "拆除",
+    "替换",
+    "改造",
+    "重新设计",
+    "补画",
+    "改成",
+    "变成",
+    "换成",
 )
 
 PRODUCT_REFERENCE_BLOCK = """【产品参考锁定】
@@ -55,16 +93,21 @@ def _clean_text(value: str, field: str) -> str:
 
 
 def _reject_product_appearance(text: str) -> None:
-    matched = next((term for term in FORBIDDEN_PRODUCT_APPEARANCE_TERMS if term in text), None)
-    if matched is not None:
-        raise ValueError(f"产品外观不得推测或描述：{matched}")
+    if has_forbidden_product_appearance(text):
+        raise ValueError("产品外观不得推测或描述")
 
 
 def has_forbidden_product_appearance(text: object) -> bool:
-    """Whether untrusted model prose names a product component appearance."""
-    return isinstance(text, str) and any(
-        term in text for term in FORBIDDEN_PRODUCT_APPEARANCE_TERMS
-    )
+    """Reject concrete component appearance or redesign prose, not actions."""
+    if not isinstance(text, str):
+        return False
+    clauses = re.split(r"[。！？；\n]", text)
+    for clause in clauses:
+        if not any(component in clause for component in FORBIDDEN_PRODUCT_APPEARANCE_TERMS):
+            continue
+        if any(term in clause for term in APPEARANCE_DESCRIPTION_TERMS):
+            return True
+    return False
 
 
 def _without_contract_blocks(scene: str, blocks: Sequence[str]) -> str:

@@ -1163,7 +1163,6 @@ def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
     )
     if issues:
         raise ValueError("视频提交提示词预检失败：" + ",".join(issues))
-    workflow.atomic_write_text(process / "视频提交提示词.txt", compiled)
     key = _attempt_key(item)
     payload = {
         "prompt": compiled,
@@ -1182,12 +1181,26 @@ def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
             raise ValueError(f"缺少有效首尾帧：{name}")
         payload[field] = "data:image/png;base64," + base64.b64encode(image.read_bytes()).decode("ascii")
     path = item / "_工作文件/任务状态/提交请求.json"
+    prompt_path = process / "视频提交提示词.txt"
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing != payload:
             raise PermissionError("已准备提交请求与当前内容/授权配置不一致")
+        if existing.get("prompt") != compiled:
+            raise PermissionError("已准备提交请求提示词与当前内容不一致")
+        if prompt_path.is_file() and prompt_path.read_text(encoding="utf-8") != compiled:
+            raise PermissionError("已提交提示词与已准备提交请求不一致")
+        if not prompt_path.is_file():
+            workflow.atomic_write_text(prompt_path, compiled)
     else:
+        if prompt_path.exists():
+            raise PermissionError("已有视频提交提示词但缺少提交请求；拒绝部分写入")
         _atomic_json(path, payload)
+        try:
+            workflow.atomic_write_text(prompt_path, compiled)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
     binding = _payload_binding(batch, item, state)
     if key in state.payload_bindings and state.payload_bindings[key] != binding:
         raise PermissionError("已绑定提交请求发生变化")
@@ -2247,7 +2260,7 @@ def _main_locked(args) -> int:
 def _archive_v01_for_rerun(item: Path) -> None:
     archive = item / "_工作文件/历史版本/视频版本/V01_初次生成"
     archive.mkdir(parents=True, exist_ok=True)
-    for category, filename in (("生成过程", "视频候选.mp4"), ("任务状态", "提交请求.json"), ("验收记录", "视频技术检查.json"), ("验收记录", "自动验收报告.md"), ("任务状态", "AutoDL提交结果.json"), ("任务状态", "提交预览.json"), ("任务状态", "查询结果.json")):
+    for category, filename in (("生成过程", "视频候选.mp4"), ("生成过程", "视频提交提示词.txt"), ("任务状态", "提交请求.json"), ("验收记录", "视频技术检查.json"), ("验收记录", "自动验收报告.md"), ("任务状态", "AutoDL提交结果.json"), ("任务状态", "提交预览.json"), ("任务状态", "查询结果.json")):
         source = item / "_工作文件" / category / filename
         if source.is_file():
             target = archive / filename

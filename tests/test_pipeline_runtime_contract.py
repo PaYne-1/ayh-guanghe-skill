@@ -163,6 +163,50 @@ def test_final_video_prompt_preflight_persists_closed_dialogue_contract(setup_ba
     assert state.image_budget_ledger == {}
 
 
+def test_prepare_payload_preserves_existing_prompt_when_new_payload_mismatches(
+    setup_batch, capsys
+):
+    runner, policy, batch, items, _ = setup_batch
+    action = approve(setup_batch, capsys)
+    accept_content(setup_batch, action, capsys)
+    for index in range(3):
+        next_image(setup_batch, capsys, (index * 20, 70, 120))
+    state = runner.load_or_create_state(batch, policy)
+    payload_path = runner.prepare_payload(batch, items[0], state)
+    prompt_path = items[0] / "_工作文件/生成过程/视频提交提示词.txt"
+    original_payload = payload_path.read_text(encoding="utf-8")
+    original_prompt = prompt_path.read_text(encoding="utf-8")
+    content_path = items[0] / "_工作文件/生成过程/策划内容.json"
+    content = json.loads(content_path.read_text(encoding="utf-8"))
+    content["video_prompt"] += "\n家属自然同行，保持画面稳定。"
+    write(content_path, content)
+
+    with pytest.raises(PermissionError, match="已准备提交请求"):
+        runner.prepare_payload(batch, items[0], state)
+
+    assert payload_path.read_text(encoding="utf-8") == original_payload
+    assert prompt_path.read_text(encoding="utf-8") == original_prompt
+    assert json.loads(original_payload)["prompt"] == original_prompt
+
+
+def test_v01_archive_moves_submission_prompt_with_submission_request(tmp_path):
+    runner = module()
+    item = tmp_path / "V001_操作简单_待生成"
+    request = item / "_工作文件/任务状态/提交请求.json"
+    prompt = item / "_工作文件/生成过程/视频提交提示词.txt"
+    write(request, {"prompt": "V01 提交提示词"})
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("V01 提交提示词", encoding="utf-8")
+
+    runner._archive_v01_for_rerun(item)
+
+    archive = item / "_工作文件/历史版本/视频版本/V01_初次生成"
+    assert not request.exists()
+    assert not prompt.exists()
+    assert (archive / "提交请求.json").is_file()
+    assert (archive / "视频提交提示词.txt").read_text(encoding="utf-8") == "V01 提交提示词"
+
+
 @pytest.mark.parametrize("field", ["storyboard_prompt", "last_frame_prompt", "video_prompt"])
 def test_content_validation_rejects_product_appearance_description(field):
     workflow = module("workflow_cli")
@@ -173,6 +217,27 @@ def test_content_validation_rejects_product_appearance_description(field):
     content[field] = "红色车架在阳光下清晰可见。"
 
     assert "product.appearance_description_forbidden" in workflow.validate_content_package(
+        content, profile
+    )
+
+
+@pytest.mark.parametrize(
+    "field, prose",
+    [
+        ("storyboard_prompt", "老人手放控制器上，保持扶手结构一致。"),
+        ("last_frame_prompt", "不要改变靠背，产品整体自然前进。"),
+        ("video_prompt", "一镜到底，连续平稳运镜，完整双人对话口播，手放控制器上，不要背景音乐。"),
+    ],
+)
+def test_content_validation_allows_component_action_and_reference_lock(field, prose):
+    workflow = module("workflow_cli")
+    profile = json.loads(
+        (SKILL / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json").read_text(encoding="utf-8")
+    )
+    content = package("V001")
+    content[field] = prose
+
+    assert "product.appearance_description_forbidden" not in workflow.validate_content_package(
         content, profile
     )
 
