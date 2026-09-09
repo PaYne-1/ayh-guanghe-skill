@@ -5,104 +5,45 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 # 产品短视频流水线
 
-## Overview
+把“产品参考图 + 卖点”转成可交付的 15 秒竖屏视频。Codex、WorkBuddy、Hermes 等兼容 Agent 使用同一文件协议；文本模型只负责内容，锁定的图片渠道只生成三张原生 4K 图片，运行器负责状态、预算、技术检查、AutoDL 任务和真实路径交付。
 
-把“产品图片 + 卖点”转成可验收的 15 秒竖屏视频项目。Codex、WorkBuddy、Hermes 或其他能读取 Agent Skills 的智能体均使用同一套文件协议；文本模型负责内容，已锁定生图渠道负责生图，便携脚本负责目录、校验、AutoDL 任务记录与验收。
+## 触发与首次回复
 
-## Trigger contract
+仅在明确触发词或 `$product-video-pipeline` 出现时，每次任务的第一步读取并完整展示 [启动确认单](references/startup-checklist.md) 的 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。普通“继续”只继续当前任务；换产品或新批次只先问一次是否开始全新任务。
 
-只在用户明确说出以下任一触发词时启动：`开始产品视频`、`制作产品视频`、`生成产品视频`、`电动轮椅视频`、`光合视频任务`、`继续产品视频任务`，或显式调用 `$product-video-pipeline`。单独出现“开始”“继续”“视频”“产品”等泛化词不触发。
+首次回复是唯一的配置与授权交互：自动生产模式的**首次回复同时授权 V01**。先在本地验证价格、预算、渠道与安全环境；只有硬阻断才返回用户。不得要求 `approve-start`、第二次自动启动确认、单独图片预算、图片审核或 V01 语义审核。第三方图片 API 只确认 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，只记录环境变量名，绝不索取密钥。
 
-## Required routing
+用户只填写一个 `本批次最高总预算`。它覆盖 V01 视频和初始图片估算；运行器在本地拆分内部台账，不把图片预算作为用户输入，也不把 V02 计入此授权。学习确认模式保留 `approve-start` 和最终人工验收。
 
-0. **明确触发后才启动**：每次任务明确触发后的第一步，才读 [启动确认单](references/startup-checklist.md) 并完整展示 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块；其中必须选择 `GPT 网页端` 或 `第三方 API`。选择第三方 API 时，同时确认 `api_name`、`base_url`、`model`、`api_key_env`、单张价格与图片 API 批次预算；只记录环境变量名，绝不显示或索取密钥。“你好”或普通“继续”不触发新任务。选择和适用配置确认前，不扫描产品素材、不创建批次、不联网查询、不生图、不 dry-run，也不调用付费接口。
-1. **安全接入 API**：首次启动清单不询问 AutoDL API 接入状态或鉴权方式。用户授权验证后直接读取安全环境配置；`AUTODL_AUTH_SCHEME` 未设置时沿用脚本默认值 `bearer`。只有缺少 `AUTODL_API_KEY`，或鉴权实际失败并导致流程无法继续时，才询问并引导用户安全配置；不得要求用户把完整密钥粘贴到聊天中。
-2. 用户回复启动清单后，完成实时价格与 V01 总预算确认；dry-run 不联网、不扣费，API 可用或 dry-run 通过都不代表付费授权。
-3. 启动时按需读取 [11 节点流程](references/workflow.md)、[内容契约](references/content-contract.md)、[自动复盘与规避规则](references/automatic-learning-rules.md) 及产品配置；详细引用是人工审计文档，运行时不在每个节点反复整篇读入模型上下文。
-4. **生图渠道必须在启动时二选一并在批次内锁定**：`GPT 网页端` 使用当前已登录浏览器会话；`第三方 API` 使用已确认的非密钥配置和独立图片 API 批次预算。批准后的已锁定生图渠道禁止自动切换或在失败后回退到另一渠道；`gpt_web` 选择时禁止使用服务器端 OpenAI API。运行器会返回 `GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，两者均用 `accept-image` 提交下载的本地文件。不进行人工图片审核，也不进行模型视觉审核；本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
-5. DeepSeek 只用于批次内容创作和异常修复，必须由 `pipeline_policy.json` 的批次/单视频调用计数器限制。生图接收、技术检查、哈希、轮询、下载、晋升、审计和恢复不调用 DeepSeek。
-6. 视频 V01 只能在已批准总预算内提交；失败后 V02 必须取得该视频的单独费用授权，不得提交 V03。最终视频始终由用户人工验收，见 [AutoDL H3](references/autodl-h3.md)、[验收与学习](references/review-learning.md) 和 [交付契约](references/delivery-contract.md)。
+## 不可变生成合同
 
-## Start
+- 每个生成提示词都声明：**产品参考图是唯一产品依据**；直接使用参考图，**禁止用文字重新描述产品外观**，禁止重新设计、补画、删减、替换或推测任何部件。
+- 分镜、尾帧、封面均为**原生2160×3840**、9:16、8,294,400 像素；必须由渠道原生生成，**禁止本地放大**。只允许解码和 RGB 转换，不允许空间重采样。
+- 视频固定 0–15 秒、一个连续镜头、**固定中远景**。老人、陪护者和完整产品全程处于安全区；无切镜、跳切、转场、景别变化或新增人物/产品。
+- 台词清单是封闭合同：每句只出现一次并由指定 `speaker_id` 说出；**非当前说话者嘴巴闭合且完全不发声**；**清单之外零人声**、无画外音、无重复、无改词、无 BGM。
 
-先完成每次任务必需的三段式启动沟通并获得明确回复；以下命令只能在回复后的验证阶段运行。
+详细规则见 [内容契约](references/content-contract.md)、[生图路由](references/image-generation-routing.md)、[工作流](references/workflow.md)、[AutoDL H3](references/autodl-h3.md)、[交付契约](references/delivery-contract.md)。
 
-只读取用户给定产品文件夹第一层图片。卖点直接使用，一个卖点对应一条独立视频；数量多于卖点时从第一个卖点开始分配余数。
+## 运行
 
 ```powershell
 python scripts/workflow_cli.py init `
   --product-dir "用户产品文件夹" `
   --product-name "产品名称" `
-  --selling-point "卖点一" --selling-point "卖点二" `
-  --total 2 --mode learning --resolution 768P `
-  --max-budget 20 --cover-reference-dir "封面图参考文件夹" `
-  --image-provider gpt_web
+  --selling-point "卖点一" --total 1 --mode auto --resolution 768P `
+  --max-budget 20 --image-provider gpt_web
 ```
 
-选择第三方 API 时，改用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`；该 JSON 只包含已确认的服务、模型、环境变量名、单张价格和批次预算，绝不包含 API 密钥。
+第三方 API 使用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`。已锁定生图渠道不可替换。初始化后按以下循环执行，始终只执行返回的一个外部动作：
 
-打开生成的 `启动确认单.json`，向用户一次确认。两种模式的图片节点都不做人工或模型视觉审核，下载结果通过免费技术检查后自动晋升；最终视频都进入批量人工验收。
+1. 自动模式首次回复后填写本地价格配置，调用 `pipeline_runner.py next`；学习确认模式才调用 `approve-start`。
+2. `BATCH_CONTENT_REQUIRED` 写入内容 JSON 后 `accept-content`；`GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED` 用 `accept-image` 回传下载文件。渠道批次内锁定，禁止自动切换；图片不进行人工图片审核或模型视觉审核。
+3. `LOCAL_WORK_REQUIRED`/`VIDEO_POLL_PENDING` 使用 `run-local`。`run-local --dry-run` 返回 `DRY_RUN_COMPLETE`，不联网、不扣费、不推进状态。
+4. 自动 V01 的确定性技术检查通过后自动晋升并交付 `V01_DELIVERED`，状态为 `WAITING_USER_FEEDBACK`。返回的 `video_path` 和 `item_dir` 必须是**真实存在的绝对路径**，并附 SHA-256、技术证据和成本。不得自动判断 V01 语义好坏。
+5. 仅在用户反馈后才使用 `request-rerun --batch PATH --video-id ID --reason TEXT` 记录问题。该命令不付费；随后必须对 V02 显式批准单视频费用，才可 `approve-rerun`。V02 进入学习式人工验收，绝不自动 V03。
 
-## Runtime loop
+不得把完整日志粘贴回模型上下文，只读取紧凑 JSON。API 失效、余额不足、总预算不足、缺少安全配置或本地技术失败是硬阻断；其他项目可继续。`gpt_web_image` 动作与 `image_budget_ledger` 是内部台账分类。学习模式的 `review-output` 和 `audit-outputs` 仍绑定明确通过与 SHA-256；自动 V01 不使用这两个审核关卡。
 
-1. 完成启动清单和预算确认，在启动 JSON 填入 `unit_price_yuan` 或逐项 `prices_by_video`，并明确 `image_provider`。再调用 `pipeline_runner.py approve-start --batch "批次目录" --approved-budget "批准预算" --estimated-v01-total "V01总价" --image-provider "gpt_web 或 third_party_api"`；第三方 API 还须提供与启动确认单一致的 `--image-api-config` 文件。脚本绑定项目 ID/数量、单价、总价、分辨率、工作流和图片渠道；配置变更不继承付费授权。
-2. 调用 `pipeline_runner.py next` 并只执行返回的一个外部动作。
-3. `BATCH_CONTENT_REQUIRED` 按 `prompt_path` 为指定 `video_ids` 写入内容 JSON，调用 `accept-content --action-id "动作ID"`。`GPT_WEB_IMAGE_REQUIRED` 按 `reference_paths` 上传参考图并完成一次网页生成/下载；`THIRD_PARTY_IMAGE_REQUIRED` 由宿主/API 适配器按动作内非密钥配置生成并下载。两者都调用 `pipeline_runner.py accept-image --action-id "动作ID"` 回传本地文件。动作在返回前已保留次数；恢复时沿用同一 `action_id`，不得自行重发生成或切换渠道。
-4. 图片不进行人工审核，也不进行模型视觉审核；技术检查和自动晋升由脚本完成。
-5. `LOCAL_WORK_REQUIRED` 或 `VIDEO_POLL_PENDING` 时执行 `run-local --batch "批次目录"`；脚本顺序生成首尾帧 payload、执行 AutoDL、保存证据并生成报告。若含 `recovery_required`，先修复列明的本地环境问题，再用同一命令恢复原版本/原 task_id，不重新付费。轮询、下载、哈希、晋升、审计和恢复不得调用 DeepSeek。`run-local --dry-run` 只返回 `DRY_RUN_COMPLETE` 预览，不推进真实进度。
-6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`LOCAL_OUTPUT_REPAIR_REQUIRED` 按 `audit_path` 恢复缺失/损坏的已批准产出，再运行 `run-local`，此分支只审计、不生成、不付费。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
-7. 不得把完整日志粘贴回模型上下文；只读取脚本输出的紧凑 JSON。
+## 产出与路径
 
-默认分别限制批次内容创建 1 次、内容校验修正 1 次、必要异常诊断 1 次。`GPT_WEB_IMAGE_REQUIRED` 仅按 `gpt_web_image` 动作类别计数，不占用第三方图片 API 预算；`THIRD_PARTY_IMAGE_REQUIRED` 的预留、结算和余额只写入独立 `image_budget_ledger`，并受启动时确认的图片 API 批次预算限制，不与文本模型或 AutoDL 视频费用混合。必要诊断先运行 `reserve-diagnostic --batch "批次目录" --video-id "视频ID" --reason "简短原因"`，按返回动作完成后用 `accept-diagnostic --action-id "动作ID" --result "诊断JSON"` 接收。诊断只记录建议，不扩大付费或重生图授权。
-
-## Execution contract
-
-- 每条项目固定为轮椅真实向前行驶、老人和一名陪护者或家属进行双人对话；只生成一套内容、一张正式分镜首帧、一张合理尾帧、一张封面图和一个视频。
-- 单条任务目录第一级只保留 `标题.txt`、`发布正文.txt`、`话题标签.txt`、`分镜图.png`、`尾帧图.png`、`封面图.png`、按发布标题清洗命名的 `.mp4` 七项最终产出和 `_工作文件`；所有状态、提示词、音轨、验收证据、实验文件及历史版本必须写入 `_工作文件` 的对应分类，禁止散落在第一级。
-- 七项最终产出都必须在 `_工作文件/验收记录/产出验收记录.json` 中绑定候选路径和 SHA-256。启动确认是内容与图片前置节点的持续执行授权；图片仅通过本地免费技术检查后记录该授权并晋升，不再逐节点询问。最终视频仍必须由用户明确通过。
-- `review-output` 会先保存不可变验收候选快照，再追加验收事件；重新生成同名候选时旧候选进入 `_工作文件/历史版本/候选版本`，不得覆盖或破坏既有验收证据。
-- 所有分镜图默认生成竖屏 4K：`2160×3840`、`9:16`。这是分镜图固定默认值；视频仍按启动确认单选择 `768P` 或 `2K`，两者不得混用。
-- 图片技术失败的重试次数由 `pipeline_policy.json` 限制；耗尽后只暂停该项目，其他项目继续。
-- 视频为 V01 初次生成。验收失败时先反馈问题与证据；只有用户对该视频单独批准 V02 费用后才允许重跑，启动时的批次授权不等于 V02 授权。V02 不通过时不得提交 V03。
-- 每条项目在分镜通过免费技术检查并自动晋升后，必须把该 `2160×3840` 分镜作为 `first_frame`，再独立生成合理尾帧作为 `last_frame`。尾帧通过相同技术检查、绑定独立 SHA-256 后自动晋升为一级 `尾帧图.png`；尾帧不得复用首帧。
-- 所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`。一级 `分镜图.png` 与 `尾帧图.png` 必须具有各自有效的通过事件和不同 SHA-256；本地语义字段为 `first_frame`、`last_frame`，提交时映射为服务端当前字段；任一素材或通过证据缺失时不得 dry-run 或付费提交。
-- 每套脚本必须恰好包含老人和一名陪护者或家属两个不同的 `speaker_id`，两人都在画面中真实对话；陪护者身份按脚本确定，不固定为女儿。模型原生音轨必须让两个角色的声音与身份、性别和年龄感匹配且彼此可区分；少角色、同一人包办全部台词、音色不可区分、顺序错误或自问自答时不得通过视频验收。
-- AutoDL 成功返回后立即保存 `task_id`；未知提交状态不得盲目重提。
-- API 整体失效、余额不足、预算超限或必要配置失效才暂停整个批次。
-- 生成完成不等于交付完成。任务只有在七项最终产出审计全部有效后才算完成：视频按发布标题命名并位于一级目录、媒体可解码、`audit-outputs` 无缺失/撤下/错误、任务状态已更新为 `COMPLETED`。每次返回 `DONE` 前，运行器必须重新审计整批所有视频的七项产出，不依赖以前的 `COMPLETED` 标记或仅审计本次验收清单；已完成兄弟项目缺失或损坏时进入本地交付修复，不因此开放 V02。
-
-## Quick reference
-
-| 任务 | 命令/规则 |
-|---|---|
-| 内容落盘 | `workflow_cli.py validate-content` |
-| 封面文字 | 已锁定生图渠道一次生成包含准确标题的完整封面；禁止代码叠字，生成结果不做二次文字审核 |
-| 明确验收产出 | `workflow_cli.py review-output`，`passed` 后才晋升一级目录 |
-| 审计一级产出 | `workflow_cli.py audit-outputs`，撤下无有效通过证据的文件 |
-| 付费前检查 | `autodl_h3.py submit --dry-run` |
-| 正式提交 | 运行器 `run-local` 在绑定的批准清单内提交；不跳过运行器直接调用付费客户端 |
-| 批量验收 | 打开运行器 `USER_FINAL_REVIEW_REQUIRED` 返回的 `report_path` |
-| 完成交付 | 用户通过视频 → `review-output` → 标题化 `.mp4` → `audit-outputs` 全绿 → `COMPLETED` |
-| 跨 Agent 安装 | 读 [安装说明](references/install.md) |
-
-## 已验证纠正规则矩阵
-
-| 失败表现 | 后续强制动作 | 完成证据 |
-|---|---|---|
-| 启动阶段重复询问 Key 或鉴权 | 回复后直接检查安全环境，鉴权缺省 `bearer`；只有 Key 缺失或真实鉴权失败才询问 | 配置检查或明确阻断证据 |
-| 自动模式每个节点都停下来确认 | 启动和付费授权后连续完成六项前置产出，只在最终视频、失败重跑或硬阻断处暂停 | 前置产出验收事件绑定本批次自动授权 |
-| 先做无字底图再用代码叠字 | 已锁定生图渠道一次生成画面、版式和准确标题，下载后做本地技术检查 | 完整封面原图、提示词与候选 SHA-256 |
-| 自动验收失败后直接付费重跑 | 先展示候选和失败证据，再询问是否重跑 | 用户对该次重跑的明确授权 |
-| 用户认定合格但视频未进入一级目录 | 对指定候选追加 `passed`，保留旧 `failed`，立即晋升标题化文件 | 最新通过事件与一级文件 SHA-256 一致 |
-| `标题.txt` 含发布标题和封面标题 | 文件名只解析 `发布标题：` 行 | 一级 `.mp4` 不含封面标题 |
-| 生成结束后提前宣告完成 | 审计七项产出、全片解码、更新 `COMPLETED` 后再交付 | `audit-outputs` 无 missing/demoted/errors |
-
-## Common mistakes
-
-- 不要在节点中途才询问模型、API、配音、2K 或预算。
-- 不要把标题、脚本或分镜沉淀为素材库；只沉淀产品独立卖点和已验证规则。
-- 不要用自动评分替代人工视频验收。
-- 不要因自动验收不通过直接提交重跑；先反馈并取得该次明确授权。
-- 不要把单条失败扩大为整个批次失败。
-- 不要在节点获批后停住等待无必要的“继续”；按交付契约推进到下一审批点。
-- 不要用固定名 `视频.mp4` 作为最终交付名；必须使用清洗后的发布标题。
+单条任务第一级只保留 `标题.txt`、`发布正文.txt`、`话题标签.txt`、`分镜图.png`、`尾帧图.png`、`封面图.png`、按发布标题清洗命名的 `.mp4` 和 `_工作文件`。每项都有候选、SHA-256 和事件记录；过程文件只写入 `_工作文件`。自动 V01 交付后等待用户反馈，不把 `WAITING_USER_FEEDBACK` 伪装为 `COMPLETED`。所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`。

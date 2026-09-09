@@ -144,7 +144,7 @@ def test_startup_communication_is_complete_before_any_task_action():
         "GPT 网页端",
         "第三方 API",
         "必须选择",
-        "图片 API 批次预算",
+        "本批次最高总预算",
     ):
         assert phrase in startup
     provider_choice = startup.index("GPT 网页端")
@@ -194,7 +194,7 @@ def test_image_generation_routing_requires_a_locked_provider_and_is_review_free(
         "不进行人工图片审核",
         "不进行模型视觉审核",
         "api_key_env",
-        "图片 API 批次预算",
+        "本批次最高总预算",
     )
     for phrase in required_phrases:
         assert phrase in combined
@@ -211,9 +211,66 @@ def test_image_generation_routing_requires_a_locked_provider_and_is_review_free(
         "model",
         "api_key_env",
         "unit_price_yuan",
-        "batch_budget_yuan",
     ):
         assert field in combined
+    assert "batch_budget_yuan" not in combined
+
+
+def test_native_4k_unattended_operator_contract_is_complete_and_not_appearance_descriptive():
+    """The portable operator docs must match the sealed unattended V01 flow."""
+    documents = {
+        relative: (SKILL_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "SKILL.md",
+            "references/startup-checklist.md",
+            "references/content-contract.md",
+            "references/image-generation-routing.md",
+            "references/workflow.md",
+            "references/autodl-h3.md",
+            "references/review-learning.md",
+            "references/delivery-contract.md",
+            "references/ayh-wheelchair-rules.md",
+        )
+    }
+    combined = "\n".join(documents.values())
+    for phrase in (
+        "产品参考图是唯一产品依据",
+        "禁止用文字重新描述产品外观",
+        "原生2160×3840",
+        "禁止本地放大",
+        "固定中远景",
+        "非当前说话者嘴巴闭合且完全不发声",
+        "清单之外零人声",
+        "本批次最高总预算",
+        "首次回复同时授权 V01",
+        "WAITING_USER_FEEDBACK",
+        "真实存在的绝对路径",
+    ):
+        assert phrase in combined
+
+    for stale_global_rule in (
+        "图片 API 批次预算",
+        "batch_budget_yuan",
+        "自动模式图片审核",
+        "自动模式最终视频审核",
+        "最终视频都进入批量人工验收",
+        "原图为 `1152×2048` 时可等比归一化",
+    ):
+        assert stale_global_rule not in combined
+
+    for relative in (
+        "references/content-contract.md",
+        "references/image-generation-routing.md",
+        "references/workflow.md",
+        "references/delivery-contract.md",
+        "references/ayh-wheelchair-rules.md",
+    ):
+        text = documents[relative]
+        assert "产品参考图是唯一产品依据" in text
+        prompt_rules, _, diagnostic = text.partition("人工反馈定位知识（不得注入生成提示词）")
+        assert diagnostic, f"{relative} must retain facts only as diagnostic knowledge"
+        for appearance in ("黑色脚踏板", "车架", "轮胎", "控制器"):
+            assert appearance not in prompt_rules
 
 
 def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details():
@@ -348,7 +405,6 @@ def test_clean_first_level_and_work_file_rules_are_documented():
 
     assert "第一级只保留" in skill
     for name in (
-        "视频.mp4",
         "封面图.png",
         "发布正文.txt",
         "话题标签.txt",
@@ -357,15 +413,9 @@ def test_clean_first_level_and_work_file_rules_are_documented():
         "尾帧图.png",
     ):
         assert name in skill
-    for category in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本"):
-        assert category in workflow
-    assert "_工作文件/任务状态/任务信息.json" in autodl
-    assert '--payload "_工作文件/任务状态/提交请求.json"' in autodl
-    assert '--state "_工作文件/任务状态/提交预览.json"' in autodl
-    assert '--state "_工作文件/任务状态/AutoDL提交结果.json"' in autodl
-    assert "_工作文件/验收记录/自动验收报告.md" in review
+    assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
-    assert "最终文件按 [交互与最终交付契约]" in workflow
+    assert "真实存在的绝对路径" in workflow
     assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
@@ -376,15 +426,10 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
     combined = "\n".join((skill, workflow, contract, review))
 
-    assert "产出验收记录.json" in combined
-    assert "明确通过" in skill
-    assert "SHA-256" in workflow
-    assert "没有明确通过" in workflow and "一级目录不保留" in workflow
-    assert "review-output" in skill and "audit-outputs" in skill
-    assert "自动验收" in review and "不能" in review and "最终晋升" in review
-    assert "_工作文件/生成过程/标题.txt" in contract
-    assert "_工作文件/生成过程/发布正文.txt" in contract
-    assert "_工作文件/生成过程/话题标签.txt" in contract
+    assert "SHA-256" in combined
+    assert "WAITING_USER_FEEDBACK" in skill
+    assert "V02" in review
+    assert "产品参考图是唯一产品依据" in contract
     assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
@@ -454,7 +499,7 @@ def test_automatic_learning_reference_is_complete_and_routed():
     learning = (SKILL_ROOT / "references" / "automatic-learning-rules.md").read_text(
         encoding="utf-8"
     )
-    assert "references/automatic-learning-rules.md" in skill
+    assert "references/automatic-learning-rules.md" not in skill
     assert "用户反馈 → 自动复盘 → V02验证 → 自动升级正式规则 → 下次任务强制加载并执行" in learning
     assert "record-issue" in learning
     assert "validate-learning" in learning
@@ -1241,16 +1286,15 @@ def test_autodl_reference_uses_current_comfyui_workflow():
     assert "/api/v1/minimax/v2/video_generation" not in text
     assert "first_frame" in text
     assert "last_frame" in text
-    assert "minimax_h3_image_audio_to_video_v2_15s" in text
-    assert "不得用于新任务、V01 或 V02 提交" in text
+    assert "V01_DELIVERED" in text
+    assert "WAITING_USER_FEEDBACK" in text
 
 
 def test_workflow_requires_video_to_match_accepted_storyboard_visuals():
     text = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
-    assert "已通过本地技术检查的分镜是视频提示词的视觉基准" in text
-    assert "人物完整度、产品角度、构图、亮度、曝光、白平衡和色温" in text
-    assert "由用户在最终视频验收中判断" in text
-    assert "不额外触发模型逐段审核" in text
+    assert "产品参考图是唯一产品依据" in text
+    assert "固定中远景" in text
+    assert "不自动判断语义质量" in text
 
 
 def test_rules_require_single_shot_smooth_camera_and_complete_narration():
@@ -1260,22 +1304,21 @@ def test_rules_require_single_shot_smooth_camera_and_complete_narration():
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
     assert "禁止切镜、跳切、转场" in workflow
-    assert "缓慢、连续、平稳运镜" in workflow
+    assert "缓慢连续平稳运镜" in workflow
     assert "最多49个汉字" in contract
     assert "自动精简" in contract
-    assert "尾句被截断" in review
-    assert "由用户在最终视频验收时检查全片" in review
-    assert "默认不调用模型做逐段视觉检查或语音转写" in review
-    assert "全部台词按自然聊天语速在 15 秒内完整说完" in wheelchair
+    assert "台词重复" in review
+    assert "用户反馈后才允许" in review
+    assert "清单之外零人声" in wheelchair
 
 
 def test_first_last_frame_workflow_applies_core_rules_for_full_duration():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "整个0–15秒" in workflow
-    assert "整个 0–15 秒" in autodl
-    assert "一镜到底、连续平稳运镜、完整双人对话口播" in autodl
+    assert "完整 0–15 秒" in workflow
+    assert "覆盖完整 0–15 秒" in autodl
+    assert "固定中远景" in autodl
     assert "首尾帧只加强端点约束" in autodl
 
 
@@ -1285,10 +1328,10 @@ def test_new_videos_use_fixed_first_last_frames_and_native_dialogue():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`" in skill
-    assert "行驶双人对话合理尾帧模式：固定启用" in startup
-    assert "生成原生双角色对话" in workflow
-    assert "模型原生双角色对话音轨" in autodl
+    assert "minimax_h3_lightx2v_v5_15s" in skill
+    assert "首次回复同时授权 V01" in startup
+    assert "清单之外零人声" in workflow
+    assert "封闭双角色原生音轨" in autodl
     assert "minimax_h3_image_audio_to_video_v2_15s" not in skill
 
 
@@ -1298,12 +1341,10 @@ def test_dialogue_scripts_require_distinct_speakers_without_user_listening_gate(
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
-    assert "每条脚本必须恰好包含" in workflow
-    assert "两个不同的 `speaker_id`" in workflow
-    assert "成片必须逐句核验" in workflow
-    assert "必须恰好是两个一致且不同的 ID" in contract
-    assert "老人自问自答" in review
-    assert "角色身份不得固定为女儿" in wheelchair
+    assert "speaker_id" in workflow
+    assert "恰好为老人和一名陪护者/家属" in contract
+    assert "同一人包办" in wheelchair
+    assert "清单之外零人声" in workflow
 
 
 def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
@@ -1311,11 +1352,11 @@ def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "每条项目固定为轮椅真实向前行驶" in skill
-    assert "所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`" in skill
+    assert "固定中远景" in skill
+    assert "minimax_h3_lightx2v_v5_15s" in skill
     assert "2160×3840" in workflow
-    assert "约 1–1.5 米" in workflow
-    assert "尾帧不得复用首帧" in autodl
+    assert "尾帧" in workflow
+    assert "SHA-256 不同" in autodl
     assert "first_frame" in autodl and "last_frame" in autodl
 
 
@@ -1324,13 +1365,11 @@ def test_dialogue_roles_are_relationship_agnostic_and_end_with_order_cta():
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
     assert "陪护者/家属" in contract
-    assert "儿子、女儿、孙子、孙女" in contract
-    assert "提问者提出问题" in contract
-    assert "老人回答卖点" in contract
+    assert "一个购买前问题" in contract
+    assert "唯一卖点" in contract
     assert "下单类行动指令" in contract
-    assert "角色身份不得固定为女儿" in wheelchair
-    assert "自然看向对方" in wheelchair
-    assert "老人自问自答" in wheelchair
+    assert "身份不固定为女儿" in wheelchair
+    assert "非当前说话者嘴巴闭合且完全不发声" in wheelchair
 
 
 def test_reasonable_tail_review_keeps_hard_failures_and_user_final_decision():
@@ -1338,10 +1377,9 @@ def test_reasonable_tail_review_keeps_hard_failures_and_user_final_decision():
 
     assert "自然视角变化" in review
     assert "轻微亮度波动" in review
-    assert "不得单独自动判为硬失败" in review
-    assert "切镜、人物裁切、产品结构变形" in review
-    assert "用户明确验收结论为最终状态" in review
-    assert "保留自动检查证据" in review
+    assert "技术证据" in review
+    assert "用户反馈" in review
+    assert "V02" in review
 
 
 def test_review_report_contains_one_card_per_video(tmp_path):
@@ -1948,10 +1986,10 @@ def test_compact_pipeline_policy_is_versioned_with_allowed_image_providers():
         "download_retries": 1,
     }
     assert policy["approvals"] == {
-        "startup_budget": True,
-        "v01_within_budget": "automatic",
+        "auto_initial_response_authorizes_v01": True,
+        "learning_startup_budget": True,
         "v02": "user_required",
-        "final_video": "user_required",
+        "final_video": {"auto": "deliver_without_review", "learning": "user_required"},
     }
     assert policy["model_budget"]["per_video"] == 6
 
@@ -2118,7 +2156,6 @@ def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, 
             "model": "offline-image-v1",
             "api_key_env": "OFFLINE_TEST_IMAGE_API_KEY",
             "unit_price_yuan": "0.20",
-            "batch_budget_yuan": "1.00",
         }
         if provider == "third_party_api"
         else None
@@ -3020,11 +3057,11 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
                 "speaker_id": "P1",
                 "dialogue": "操作很顺手，我自己就能开，家里人也省心。",
             },
-            {
-                "start": 11,
-                "end": 15,
-                "speaker_id": "P1",
-                "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。",
+                {
+                    "start": 11,
+                    "end": 15,
+                    "speaker_id": "P2",
+                    "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解。",
             },
         ],
         "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",
@@ -3043,7 +3080,9 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     )
     profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
 
-    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
+    product = tmp_path / "产品参考.png"
+    Image.new("RGB", (64, 64), "navy").save(product)
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}, "product_images": [str(product)]}), encoding="utf-8")
     assert runner.main(
         [
             "approve-start",
@@ -3057,7 +3096,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
             "gpt_web",
         ]
     ) == 0
-    capsys.readouterr()
+    content_action = json.loads(capsys.readouterr().out)
     assert runner.main(
         [
             "accept-content",
@@ -3065,11 +3104,14 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
             str(batch),
             "--content-dir",
             str(content_dir),
+            "--action-id",
+            content_action["action_id"],
             "--profile",
             str(profile),
         ]
     ) == 0
-    capsys.readouterr()
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True, accepted
     for artifact, color in (
         ("分镜图.png", "blue"),
         ("尾帧图.png", "green"),
@@ -3078,7 +3120,8 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
         source = tmp_path / artifact
         Image.new("RGB", (2160, 3840), color).save(source)
         assert runner.main(["next", "--batch", str(batch)]) == 0
-        capsys.readouterr()
+        action = json.loads(capsys.readouterr().out)
+        assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED", action
         assert runner.main(
             [
                 "accept-image",
@@ -3090,6 +3133,8 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
                 artifact,
                 "--source",
                 str(source),
+                "--action-id",
+                action["action_id"],
             ]
         ) == 0
         capsys.readouterr()

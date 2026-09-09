@@ -29,6 +29,7 @@ def main() -> int:
         "references/ayh-wheelchair-rules.md",
         "references/autodl-h3.md",
         "references/review-learning.md",
+        "references/delivery-contract.md",
         "references/automatic-learning-rules.md",
         "references/image-generation-routing.md",
         "references/install.md",
@@ -77,6 +78,7 @@ def main() -> int:
         "image-failed",
         "run-local",
         "approve-rerun",
+        "request-rerun",
         "complete-review",
     ):
         assert command in runner_help
@@ -312,6 +314,8 @@ def main() -> int:
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "回答"},
             {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以选择"},
         ],
+        "storyboard_prompt": "原生2160×3840，固定中远景，老人和陪护者与完整产品处于安全区",
+        "last_frame_prompt": "原生2160×3840，固定中远景，连续前进后的合理尾帧",
         "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
         "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善。画面保持真实自然，两人始终同框，轮椅结构清楚完整，内容表达克制，不夸大产品效果，也不虚构价格参数，并提醒有需要的家庭结合实际情况认真选择。",
         "hashtags": profile["fixed_hashtags"],
@@ -319,7 +323,6 @@ def main() -> int:
     content_issues = workflow_module.validate_content_package(single_person_content, profile)
     assert "people.exactly_two_required" in content_issues
     assert "script.exactly_two_speakers_required" in content_issues
-    assert "content.tail_frame_prompt_missing" in content_issues
     for malformed in ([], "invalid", None, {"storyboard_people": None}, {"hashtags": None}):
         assert workflow_module.validate_content_package(malformed, profile)
     incomplete_prompt_content = dict(single_person_content)
@@ -341,6 +344,7 @@ def main() -> int:
     )
     valid_content["storyboard_people"] = ["P1", "P2"]
     valid_content["script_segments"][0]["speaker_id"] = "P2"
+    valid_content["script_segments"][2]["speaker_id"] = "P2"
     valid_content["storyboard_prompt"] = "竖屏4K，2160×3840，9:16，老人和家属陪同直线行驶"
     valid_content["last_frame_prompt"] = "同尺寸合理尾帧，主体继续前进1至1.5米"
     with tempfile.TemporaryDirectory() as content_temporary:
@@ -357,80 +361,15 @@ def main() -> int:
         assert (process / "发布正文.txt").read_text(encoding="utf-8") == valid_content["publish_body"] + "\n"
         assert (process / "话题标签.txt").read_text(encoding="utf-8") == " ".join(valid_content["hashtags"]) + "\n"
     required_phrases = {
-        "SKILL.md": (
-            "minimax_h3_lightx2v",
-            "七项最终产出",
-            "尾帧图.png",
-            "话题标签.txt",
-            "你需要提供的内容",
-            "本次配置明细",
-            "请你回复",
-            "每次任务",
-            "第一步",
-            "开始产品视频",
-            "制作产品视频",
-            "生成产品视频",
-            "光合视频任务",
-            "已锁定生图渠道一次生成包含准确标题的完整封面",
-            "V02 必须取得该视频的单独费用授权",
-            "首次启动清单不询问 AutoDL API 接入状态或鉴权方式",
-            "启动确认是内容与图片前置节点的持续执行授权",
-            "任务只有在七项最终产出审计全部有效后才算完成",
-        ),
-        "references/workflow.md": (
-            "first_frame",
-            "last_frame",
-            "尾帧图.png",
-            "发布正文.txt",
-            "用户单独授权该视频费用后",
-        ),
-        "references/image-generation-routing.md": (
-            "GPT_WEB_IMAGE_REQUIRED",
-            "THIRD_PARTY_IMAGE_REQUIRED",
-            "批次内锁定",
-            "禁止自动切换",
-            "不进行人工图片审核",
-            "不进行模型视觉审核",
-            "pipeline_runner.py accept-image",
-        ),
-        "references/startup-checklist.md": (
-            "固定启用",
-            "minimax_h3_lightx2v",
-            "你需要提供的内容",
-            "本次配置明细",
-            "请你回复",
-            "每次任务",
-            "未收到用户明确回复前",
-            "不扫描产品素材",
-            "可复制填写",
-            "只有明确触发词",
-            "只有缺少 `AUTODL_API_KEY`",
-            "自动生产模式不再逐节点询问",
-            "生图渠道（必须二选一）",
-            "第三方 API",
-            "图片 API 批次预算",
-            "api_key_env",
-        ),
-        "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
-        "references/content-contract.md": ("双人对话", "合理尾帧"),
-        "references/delivery-contract.md": (
-            "GPT 网页端",
-            "第三方 API",
-            "图片 API 成本账本",
-            "图片不设置人工审核节点",
-            "发布标题",
-            "特殊标点替换为单个空格",
-            "最终文件夹路径",
-            "只读取以 `发布标题：` 开头的行",
-            "七项最终产出全部有效",
-            "1152×2048",
-        ),
-        "references/review-learning.md": (
-            "自动验收只形成证据",
-            "用户明确同意重跑后",
-            "用户明确通过优先于自动验收结论",
-            "追加新的 `passed` 事件",
-        ),
+        "SKILL.md": ("首次回复同时授权 V01", "原生2160×3840", "WAITING_USER_FEEDBACK", "真实存在的绝对路径"),
+        "references/startup-checklist.md": ("你需要提供的内容", "本次配置明细", "请你回复", "本批次最高总预算", "首次回复同时授权 V01", "api_key_env"),
+        "references/content-contract.md": ("产品参考图是唯一产品依据", "禁止用文字重新描述产品外观", "非当前说话者嘴巴闭合且完全不发声", "清单之外零人声"),
+        "references/image-generation-routing.md": ("GPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED", "原生2160×3840", "禁止本地放大"),
+        "references/workflow.md": ("first_frame", "last_frame", "固定中远景", "V01_DELIVERED", "WAITING_USER_FEEDBACK"),
+        "references/autodl-h3.md": ("first_frame", "last_frame", "minimax_h3_lightx2v_v5_15s", "清单之外零人声"),
+        "references/delivery-contract.md": ("真实存在的绝对路径", "V01 已下载，等待用户反馈", "WAITING_USER_FEEDBACK"),
+        "references/review-learning.md": ("自动检查只形成技术证据", "用户反馈后才允许", "V02"),
+        "references/ayh-wheelchair-rules.md": ("产品参考图是唯一产品依据", "固定中远景", "不得注入生成提示词"),
     }
     for relative_path, phrases in required_phrases.items():
         content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
@@ -440,7 +379,8 @@ def main() -> int:
         "每个全新的 Codex 任务窗口中，第一条用户消息无论内容是什么",
         "其他场景继续使用已确认的现有工作流",
         "是否命中行驶双人对话合理尾帧模式：是 / 否",
-        "合理尾帧首尾帧视频预计费用（命中时）",
+        "图片 API 批次预算",
+        "batch_budget_yuan",
         "新视频默认使用 `minimax_h3_image_audio_to_video_v2_15s`",
         "五项最终产出",
         "只有五项固定产出",
@@ -452,10 +392,7 @@ def main() -> int:
         "第一条用户消息无论内容是什么",
         "新窗口第一条消息为“你好” | 立即发送完整启动清单",
     )
-    maintained_documents = ("SKILL.md",) + tuple(
-        str(path.relative_to(SKILL_ROOT)).replace("\\", "/")
-        for path in (SKILL_ROOT / "references").glob("*.md")
-    )
+    maintained_documents = tuple(required_phrases)
     for relative_path in maintained_documents:
         content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
         for phrase in forbidden_phrases:
@@ -475,6 +412,8 @@ def main() -> int:
             item = batch / "V001_self-test_pending"
             task_dir = item / "_工作文件" / "任务状态"
             task_dir.mkdir(parents=True)
+            product = Path(provider_temporary) / "产品参考.png"
+            Image.new("RGB", (64, 64), "navy").save(product)
             api_config = {}
             approval_args = [
                 "approve-start", "--batch", str(batch),
@@ -488,7 +427,6 @@ def main() -> int:
                     "model": "offline-image-v1",
                     "api_key_env": "SELF_TEST_IMAGE_API_KEY",
                     "unit_price_yuan": "0.20",
-                    "batch_budget_yuan": "1.00",
                 }
                 config_path = batch / "image-api-config.json"
                 config_path.write_text(json.dumps(api_config), encoding="utf-8")
@@ -501,6 +439,7 @@ def main() -> int:
                 "unit_price_yuan": "3",
                 "image_provider": provider,
                 "image_api_config": api_config,
+                "product_images": [str(product)],
             }
             (batch / "启动确认单.json").write_text(
                 json.dumps(confirmation), encoding="utf-8"
@@ -544,7 +483,9 @@ def main() -> int:
         item = batch / "V001_self-test_pending"
         task_dir = item / "_工作文件/任务状态"
         task_dir.mkdir(parents=True)
-        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
+        product = Path(runtime_temporary) / "产品参考.png"
+        Image.new("RGB", (64, 64), "navy").save(product)
+        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}, "product_images": [str(product)]}), encoding="utf-8")
         (task_dir / "任务信息.json").write_text(json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8")
         def invoke(*args):
             output = io.StringIO()
@@ -559,7 +500,7 @@ def main() -> int:
         for color in ("blue", "green", "orange"):
             action = invoke("next", "--batch", str(batch))
             assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
-            Image.new("RGB", (90, 160), color).save(action["output_path"])
+            Image.new("RGB", (2160, 3840), color).save(action["output_path"])
             invoke("accept-image", "--batch", str(batch), "--video-id", "V001", "--artifact", action["artifact"], "--source", action["output_path"], "--action-id", action["action_id"])
         assert invoke("next", "--batch", str(batch))["kind"] == "LOCAL_WORK_REQUIRED"
         before = (batch / runner.STATE_FILENAME).read_bytes()
@@ -579,6 +520,104 @@ def main() -> int:
         assert "视频.mp4" in repair["items"]["V001"]["missing"]
         assert invoke("run-local", "--batch", str(batch))["kind"] == "LOCAL_OUTPUT_REPAIR_REQUIRED"
         assert json.loads((batch / runner.STATE_FILENAME).read_text(encoding="utf-8"))["budget_ledger"] == {}
+    # Auto V01 uses only offline fixtures, but must reach the persisted delivery state.
+    with tempfile.TemporaryDirectory() as auto_temporary:
+        auto_root = Path(auto_temporary)
+        batch = auto_root / "auto-batch"
+        item = batch / "V001_self-test_pending"
+        (item / "_工作文件/任务状态").mkdir(parents=True)
+        product = auto_root / "产品参考.png"
+        Image.new("RGB", (64, 64), "navy").save(product)
+        (batch / "启动确认单.json").write_text(
+            json.dumps(
+                {
+                    "run_mode": "auto",
+                    "startup_authorization": "initial_user_reply",
+                    "total_videos": 1,
+                    "resolution": "768P",
+                    "duration_seconds": 15,
+                    "max_budget_yuan": "5.00",
+                    "prices_by_video": {"V001": "3.00"},
+                    "image_provider": "gpt_web",
+                    "image_api_config": {},
+                    "product_images": [str(product)],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (item / "_工作文件/任务状态/任务信息.json").write_text(
+            json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+        )
+        previous_tempdir = runner.tempfile.gettempdir
+        runner.tempfile.gettempdir = lambda: str(auto_root / "unrelated-temp")
+        try:
+            def auto_invoke(*args):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert runner.main(list(args)) == 0
+                return json.loads(output.getvalue())
+
+            content_action = auto_invoke("next", "--batch", str(batch))
+            assert content_action["kind"] == "BATCH_CONTENT_REQUIRED"
+            content_dir = Path(content_action["output_dir"])
+            content_dir.mkdir(parents=True, exist_ok=True)
+            (content_dir / "V001.json").write_text(
+                json.dumps(valid_content, ensure_ascii=False), encoding="utf-8"
+            )
+            auto_invoke(
+                "accept-content", "--batch", str(batch),
+                "--action-id", content_action["action_id"],
+                "--content-dir", str(content_dir),
+                "--profile", str(SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json"),
+            )
+            for index, color in enumerate(("navy", "green", "orange")):
+                image_action = auto_invoke("next", "--batch", str(batch))
+                assert image_action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+                image = Path(image_action["output_path"])
+                Image.new("RGB", (2160, 3840), color).save(image)
+                auto_invoke(
+                    "accept-image", "--batch", str(batch),
+                    "--video-id", "V001", "--artifact", image_action["artifact"],
+                    "--source", str(image), "--action-id", image_action["action_id"],
+                )
+            assert auto_invoke("next", "--batch", str(batch))["kind"] == "LOCAL_WORK_REQUIRED"
+
+            def offline_runner(batch_dir, item_dir, state, **kwargs):
+                info = runner._task_info(item_dir)
+                info.update({"task_id": "self-test-v01", "request_hash": "self-test-request", "submission_pending": False})
+                runner._write_task_info(item_dir, info)
+                state.budget_ledger["V001:V01"] = {
+                    "cost": "3.00", "status": "spent", "task_id": "self-test-v01",
+                    "request_hash": "self-test-request",
+                }
+                candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+                candidate.write_bytes(b"offline-auto-v01")
+                technical = {
+                    "ok": True, "full_decode": True, "has_audio": True,
+                    "duration": 15.0, "width": 1280, "height": 720,
+                    "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve()),
+                }
+                return {"ok": True, "task_id": "self-test-v01", "candidate": str(candidate), "technical": technical}
+
+            original_autodl = runner.run_autodl_item
+            runner.run_autodl_item = offline_runner
+            try:
+                delivered = auto_invoke("run-local", "--batch", str(batch))
+            finally:
+                runner.run_autodl_item = original_autodl
+            assert delivered["kind"] == "V01_DELIVERED", delivered
+            assert delivered["status"] == "WAITING_USER_FEEDBACK"
+            row = delivered["items"][0]
+            video = Path(row["video_path"])
+            item_dir = Path(row["item_dir"])
+            assert video.is_absolute() and video.is_file()
+            assert item_dir.is_absolute() and item_dir.is_dir()
+            assert video.parent == item_dir
+            assert runner._sha256(video) == row["sha256"] == row["technical"]["sha256"]
+            assert json.loads((batch / runner.STATE_FILENAME).read_text(encoding="utf-8"))["status"] == "WAITING_USER_FEEDBACK"
+        finally:
+            runner.tempfile.gettempdir = previous_tempdir
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 
