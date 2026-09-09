@@ -385,9 +385,12 @@ def main() -> int:
             "用户单独授权该视频费用后",
         ),
         "references/image-generation-routing.md": (
-            "GPT 网页端是唯一生图渠道",
+            "GPT_WEB_IMAGE_REQUIRED",
+            "THIRD_PARTY_IMAGE_REQUIRED",
+            "批次内锁定",
+            "禁止自动切换",
             "不进行人工图片审核",
-            "不调用模型进行二次视觉审核",
+            "不进行模型视觉审核",
             "pipeline_runner.py accept-image",
         ),
         "references/startup-checklist.md": (
@@ -403,11 +406,17 @@ def main() -> int:
             "只有明确触发词",
             "只有缺少 `AUTODL_API_KEY`",
             "自动生产模式不再逐节点询问",
+            "生图渠道（必须二选一）",
+            "第三方 API",
+            "图片 API 批次预算",
+            "api_key_env",
         ),
         "references/autodl-h3.md": ("first_frame", "last_frame", "默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`"),
         "references/content-contract.md": ("双人对话", "合理尾帧"),
         "references/delivery-contract.md": (
-            "固定使用 GPT 网页端",
+            "GPT 网页端",
+            "第三方 API",
+            "图片 API 成本账本",
             "图片不设置人工审核节点",
             "发布标题",
             "特殊标点替换为单个空格",
@@ -454,19 +463,95 @@ def main() -> int:
     runner_spec = importlib.util.spec_from_file_location("pipeline_runner", SKILL_ROOT / "scripts/pipeline_runner.py")
     runner = importlib.util.module_from_spec(runner_spec)
     runner_spec.loader.exec_module(runner)
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    assert policy["image"]["allowed_providers"] == ["gpt_web", "third_party_api"]
+    assert policy["image"]["human_review"] is False
+    assert policy["image"]["model_visual_review"] is False
+
+    def approved_image_action(provider: str) -> dict[str, object]:
+        """Exercise routing only; never execute the returned external action."""
+        with tempfile.TemporaryDirectory() as provider_temporary:
+            batch = Path(provider_temporary) / provider
+            item = batch / "V001_self-test_pending"
+            task_dir = item / "_工作文件" / "任务状态"
+            task_dir.mkdir(parents=True)
+            api_config = {}
+            approval_args = [
+                "approve-start", "--batch", str(batch),
+                "--approved-budget", "10", "--estimated-v01-total", "3",
+                "--image-provider", provider,
+            ]
+            if provider == "third_party_api":
+                api_config = {
+                    "api_name": "Offline Example Images",
+                    "base_url": "https://images.example.test/v1",
+                    "model": "offline-image-v1",
+                    "api_key_env": "SELF_TEST_IMAGE_API_KEY",
+                    "unit_price_yuan": "0.20",
+                    "batch_budget_yuan": "1.00",
+                }
+                config_path = batch / "image-api-config.json"
+                config_path.write_text(json.dumps(api_config), encoding="utf-8")
+                approval_args.extend(["--image-api-config", str(config_path)])
+            confirmation = {
+                "total_videos": 1,
+                "resolution": "2K",
+                "duration_seconds": 15,
+                "max_budget_yuan": "10",
+                "unit_price_yuan": "3",
+                "image_provider": provider,
+                "image_api_config": api_config,
+            }
+            (batch / "启动确认单.json").write_text(
+                json.dumps(confirmation), encoding="utf-8"
+            )
+            (task_dir / "任务信息.json").write_text(
+                json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+            )
+            previous_key = os.environ.get("SELF_TEST_IMAGE_API_KEY")
+            os.environ["SELF_TEST_IMAGE_API_KEY"] = "offline-only-placeholder"
+            try:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert runner.main(approval_args) == 0
+                content_action = json.loads(output.getvalue())
+                content_dir = Path(content_action["output_dir"])
+                (content_dir / "V001.json").write_text(
+                    json.dumps(valid_content, ensure_ascii=False), encoding="utf-8"
+                )
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert runner.main([
+                        "accept-content", "--batch", str(batch),
+                        "--action-id", content_action["action_id"],
+                        "--content-dir", str(content_dir),
+                        "--profile", str(SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json"),
+                    ]) == 0
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert runner.main(["next", "--batch", str(batch)]) == 0
+                return json.loads(output.getvalue())
+            finally:
+                if previous_key is None:
+                    os.environ.pop("SELF_TEST_IMAGE_API_KEY", None)
+                else:
+                    os.environ["SELF_TEST_IMAGE_API_KEY"] = previous_key
+
+    assert approved_image_action("gpt_web")["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+    assert approved_image_action("third_party_api")["kind"] == "THIRD_PARTY_IMAGE_REQUIRED"
     with tempfile.TemporaryDirectory() as runtime_temporary:
         batch = Path(runtime_temporary) / "batch"
         item = batch / "V001_self-test_pending"
         task_dir = item / "_工作文件/任务状态"
         task_dir.mkdir(parents=True)
-        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
+        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
         (task_dir / "任务信息.json").write_text(json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8")
         def invoke(*args):
             output = io.StringIO()
             with redirect_stdout(output):
                 assert runner.main(list(args)) == 0
             return json.loads(output.getvalue())
-        action = invoke("approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "3")
+        action = invoke("approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "3", "--image-provider", "gpt_web")
         assert action["kind"] == "BATCH_CONTENT_REQUIRED" and action["action_id"]
         content_dir = Path(action["output_dir"])
         (content_dir / "V001.json").write_text(json.dumps(valid_content, ensure_ascii=False), encoding="utf-8")

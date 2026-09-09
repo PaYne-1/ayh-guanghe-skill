@@ -39,7 +39,7 @@ def configure_paid_runner_fixture(runner, batch, item, state):
     from test_pipeline_runtime_contract import package
     policy = load_script("pipeline_policy.py").load_policy(SKILL_ROOT)
     ids = [p.name.split("_", 1)[0] for p in runner._video_items(batch)]
-    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": len(ids), "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": len(ids), "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
     state.policy_digest = load_script("pipeline_policy.py").policy_digest(policy)
     state.approved_budget = "10"
     state.estimated_v01_total = str(len(ids) * 3)
@@ -51,11 +51,40 @@ def configure_paid_runner_fixture(runner, batch, item, state):
     for artifact, color in (("分镜图.png", "blue"), ("尾帧图.png", "green"), ("封面图.png", "orange")):
         raw = batch / (item.name[:4] + artifact)
         Image.new("RGB", (90, 160), color).save(raw)
-        runner.accept_web_image(item, artifact, raw)
+        runner.accept_generated_image(item, artifact, raw)
     payload = item / "_工作文件/任务状态/提交请求.json"
     payload.unlink(missing_ok=True)
     runner.save_state(batch, state)
     runner.prepare_payload(batch, item, state)
+
+
+def seal_gpt_web_manifest(runner, batch, state, policy):
+    """Give legacy offline fixtures the explicit current provider contract."""
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = (
+        json.loads(confirmation_path.read_text(encoding="utf-8"))
+        if confirmation_path.is_file()
+        else {}
+    )
+    confirmation.update({
+        "total_videos": len(runner._video_items(batch)),
+        "resolution": confirmation.get("resolution", "768P"),
+        "duration_seconds": 15,
+        "max_budget_yuan": confirmation.get("max_budget_yuan", "10"),
+        "unit_price_yuan": confirmation.get("unit_price_yuan", "3"),
+        "image_provider": "gpt_web",
+        "image_api_config": {},
+    })
+    batch.mkdir(parents=True, exist_ok=True)
+    confirmation_path.write_text(json.dumps(confirmation), encoding="utf-8")
+    state.policy_digest = load_script("pipeline_policy.py").policy_digest(policy)
+    state.approved_budget = confirmation["max_budget_yuan"]
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.estimated_v01_total = state.approved_manifest["estimated_v01_total"]
+    state.manifest_digest = load_script("pipeline_policy.py").policy_digest(
+        state.approved_manifest
+    )
+    return state
 
 
 def offline_video_result(runner, item, task_id="offline-task"):
@@ -106,8 +135,14 @@ def test_startup_communication_is_complete_before_any_task_action():
         "已提供",
         "待确认",
         "需要提供",
+        "GPT 网页端",
+        "第三方 API",
+        "必须选择",
+        "图片 API 批次预算",
     ):
         assert phrase in startup
+    provider_choice = startup.index("GPT 网页端")
+    assert startup.index("你需要提供的内容") < provider_choice < startup.index("本次配置明细")
 
 
 def test_skill_package_contains_required_portable_resources():
@@ -137,19 +172,42 @@ def test_skill_package_contains_required_portable_resources():
     assert required <= present
 
 
-def test_image_generation_routing_is_gpt_web_only_and_review_free():
+def test_image_generation_routing_requires_a_locked_provider_and_is_review_free():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(encoding="utf-8")
     startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(encoding="utf-8")
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     delivery = (SKILL_ROOT / "references" / "delivery-contract.md").read_text(encoding="utf-8")
     combined = "\n".join((skill, routing, startup, workflow, delivery))
-    assert "GPT 网页端是唯一生图渠道" in combined
+    required_phrases = (
+        "GPT 网页端",
+        "第三方 API",
+        "必须选择",
+        "批次内锁定",
+        "禁止自动切换",
+        "不进行人工图片审核",
+        "不进行模型视觉审核",
+        "api_key_env",
+        "图片 API 批次预算",
+    )
+    for phrase in required_phrases:
+        assert phrase in combined
     assert "不进行人工图片审核" in combined
-    assert "不调用模型进行二次视觉审核" in combined
-    assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" not in combined
+    assert "不进行模型视觉审核" in combined
+    assert "GPT_WEB_IMAGE_REQUIRED" in combined
+    assert "THIRD_PARTY_IMAGE_REQUIRED" in combined
+    assert "gpt_web" in combined and "OpenAI API" in combined
     assert "Codex 原生生图" not in combined
     assert "pipeline_runner.py accept-image" in combined
+    for field in (
+        "api_name",
+        "base_url",
+        "model",
+        "api_key_env",
+        "unit_price_yuan",
+        "batch_budget_yuan",
+    ):
+        assert field in combined
 
 
 def test_skill_runtime_entry_is_compact_and_runner_driven():
@@ -185,9 +243,10 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
     ):
         raw = tmp_path / artifact
         Image.new("RGB", (1152, 2048), color).save(raw)
-        runner.accept_web_image(item, artifact, raw)
+        runner.accept_generated_image(item, artifact, raw)
 
     state = runner.load_or_create_state(batch, policy)
+    seal_gpt_web_manifest(runner, batch, state, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="offline acceptance")
     runner.save_state(batch, state)
     before_calls = dict(state.model_calls_by_video)
@@ -1915,7 +1974,7 @@ def test_web_image_is_normalized_and_auto_promoted(tmp_path):
     raw = tmp_path / "gpt-result.png"
     Image.new("RGB", (1152, 2048), "navy").save(raw)
 
-    result = runner.accept_web_image(item, "分镜图.png", raw)
+    result = runner.accept_generated_image(item, "分镜图.png", raw)
 
     promoted = item / "分镜图.png"
     assert result["ok"] is True
@@ -1941,9 +2000,9 @@ def test_storyboard_and_last_frame_must_have_distinct_hashes(tmp_path):
     item = tmp_path / "V001_卖点_待生成"
     source = tmp_path / "same.png"
     Image.new("RGB", (1152, 2048), "green").save(source)
-    runner.accept_web_image(item, "分镜图.png", source)
+    runner.accept_generated_image(item, "分镜图.png", source)
     with pytest.raises(ValueError, match="尾帧不得与分镜相同"):
-        runner.accept_web_image(item, "尾帧图.png", source)
+        runner.accept_generated_image(item, "尾帧图.png", source)
 
 
 def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
@@ -1954,15 +2013,15 @@ def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
     Image.new("RGB", (1152, 2048), "navy").save(storyboard_source)
     Image.new("RGB", (1152, 2048), "green").save(last_frame_source)
 
-    runner.accept_web_image(item, "分镜图.png", storyboard_source)
-    runner.accept_web_image(item, "尾帧图.png", last_frame_source)
+    runner.accept_generated_image(item, "分镜图.png", storyboard_source)
+    runner.accept_generated_image(item, "尾帧图.png", last_frame_source)
     storyboard = item / "分镜图.png"
     storyboard_before = storyboard.read_bytes()
     approval_log = item / "_工作文件" / "验收记录" / "产出验收记录.json"
     events_before = json.loads(approval_log.read_text(encoding="utf-8"))
 
     with pytest.raises(ValueError, match="分镜不得与尾帧相同"):
-        runner.accept_web_image(item, "分镜图.png", last_frame_source)
+        runner.accept_generated_image(item, "分镜图.png", last_frame_source)
 
     assert storyboard.read_bytes() == storyboard_before
     assert json.loads(approval_log.read_text(encoding="utf-8")) == events_before
@@ -1988,6 +2047,7 @@ def test_next_image_action_is_compact_and_web_only(tmp_path):
     (process / "策划内容.json").write_text("{}", encoding="utf-8")
     state = runner.RunnerState.new("digest")
     state.status = "RUNNING_AUTOMATICALLY"
+    seal_gpt_web_manifest(runner, batch, state, policy)
 
     action = runner.next_action(batch, state, policy)
 
@@ -2460,8 +2520,9 @@ def test_run_local_dry_run_preserves_live_progress(
     ):
         source = tmp_path / artifact
         Image.new("RGB", (1152, 2048), color).save(source)
-        runner.accept_web_image(item, artifact, source)
+        runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
+    seal_gpt_web_manifest(runner, batch, state, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
     before_calls = dict(state.model_calls_by_video)
     observed = []
@@ -2496,6 +2557,8 @@ def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
             "NaN",
             "--estimated-v01-total",
             "1.00",
+            "--image-provider",
+            "gpt_web",
         ],
         check=False,
         capture_output=True,
@@ -2527,7 +2590,7 @@ def test_run_local_collects_v01_failure_and_continues_remaining_items(
         for artifact, color in zip(artifacts, colors):
             source = tmp_path / f"{item.name}_{artifact}"
             Image.new("RGB", (1152, 2048), color).save(source)
-            runner.accept_web_image(item, artifact, source)
+            runner.accept_generated_image(item, artifact, source)
 
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
@@ -2575,7 +2638,7 @@ def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
     ):
         source = tmp_path / artifact
         Image.new("RGB", (1152, 2048), color).save(source)
-        runner.accept_web_image(item, artifact, source)
+        runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
     configure_paid_runner_fixture(runner, batch, item, state)
@@ -2894,7 +2957,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
     )
     profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
 
-    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3"}), encoding="utf-8")
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
     assert runner.main(
         [
             "approve-start",
@@ -2904,6 +2967,8 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
             "10.00",
             "--estimated-v01-total",
             "3.00",
+            "--image-provider",
+            "gpt_web",
         ]
     ) == 0
     capsys.readouterr()
@@ -3121,7 +3186,7 @@ def test_failed_video_review_promotes_content_before_requesting_v02(
     ):
         source = tmp_path / artifact
         Image.new("RGB", (1152, 2048), color).save(source)
-        runner.accept_web_image(item, artifact, source)
+        runner.accept_generated_image(item, artifact, source)
     state = runner.load_or_create_state(batch, policy)
     runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
     runner.save_state(batch, state)
@@ -3182,6 +3247,7 @@ def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, 
     content_dir.mkdir()
     state = runner.load_or_create_state(batch, policy)
     state.status = "RUNNING_AUTOMATICALLY"
+    seal_gpt_web_manifest(runner, batch, state, policy)
     runner._reserve_action(batch, state, policy, {"kind": "BATCH_CONTENT_REQUIRED", "video_ids": ["V001"], "output_dir": str(content_dir)}, "content_create")
 
     return_code = runner.main(
@@ -3202,7 +3268,7 @@ def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, 
 
     source = tmp_path / "invalid-square.png"
     Image.new("RGB", (64, 64), "black").save(source)
-    runner._reserve_action(batch, restored, policy, {"kind": "GPT_WEB_IMAGE_REQUIRED", "video_id": "V001", "artifact": "分镜图.png"}, "gpt_web_image")
+    runner._reserve_action(batch, restored, policy, {"kind": "GPT_WEB_IMAGE_REQUIRED", "provider": "gpt_web", "video_id": "V001", "artifact": "分镜图.png"}, "gpt_web_image")
     return_code = runner.main(
         [
             "accept-image",

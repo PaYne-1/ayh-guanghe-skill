@@ -15,11 +15,11 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 ## Required routing
 
-0. **明确触发后才启动**：每次任务明确触发后的第一步，才读 [启动确认单](references/startup-checklist.md) 并完整展示 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块；“你好”或普通“继续”不触发新任务。未收到启动回复前，不扫描产品素材、不创建批次、不联网查询、不生图、不 dry-run，也不调用付费接口。
+0. **明确触发后才启动**：每次任务明确触发后的第一步，才读 [启动确认单](references/startup-checklist.md) 并完整展示 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块；其中必须选择 `GPT 网页端` 或 `第三方 API`。选择第三方 API 时，同时确认 `api_name`、`base_url`、`model`、`api_key_env`、单张价格与图片 API 批次预算；只记录环境变量名，绝不显示或索取密钥。“你好”或普通“继续”不触发新任务。选择和适用配置确认前，不扫描产品素材、不创建批次、不联网查询、不生图、不 dry-run，也不调用付费接口。
 1. **安全接入 API**：首次启动清单不询问 AutoDL API 接入状态或鉴权方式。用户授权验证后直接读取安全环境配置；`AUTODL_AUTH_SCHEME` 未设置时沿用脚本默认值 `bearer`。只有缺少 `AUTODL_API_KEY`，或鉴权实际失败并导致流程无法继续时，才询问并引导用户安全配置；不得要求用户把完整密钥粘贴到聊天中。
 2. 用户回复启动清单后，完成实时价格与 V01 总预算确认；dry-run 不联网、不扣费，API 可用或 dry-run 通过都不代表付费授权。
 3. 启动时按需读取 [11 节点流程](references/workflow.md)、[内容契约](references/content-contract.md)、[自动复盘与规避规则](references/automatic-learning-rules.md) 及产品配置；详细引用是人工审计文档，运行时不在每个节点反复整篇读入模型上下文。
-4. **GPT 网页端是唯一生图渠道**。分镜、尾帧和完整封面均使用网页端生成并下载原图；不进行人工图片审核，也不调用模型进行二次视觉审核。本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
+4. **生图渠道必须在启动时二选一并在批次内锁定**：`GPT 网页端` 使用当前已登录浏览器会话；`第三方 API` 使用已确认的非密钥配置和独立图片 API 批次预算。禁止自动切换或在失败后回退到另一渠道；`gpt_web` 选择时禁止使用服务器端 OpenAI API。运行器会返回 `GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，两者均用 `accept-image` 提交下载的本地文件。不进行人工图片审核，也不进行模型视觉审核；本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
 5. DeepSeek 只用于批次内容创作和异常修复，必须由 `pipeline_policy.json` 的批次/单视频调用计数器限制。生图接收、技术检查、哈希、轮询、下载、晋升、审计和恢复不调用 DeepSeek。
 6. 视频 V01 只能在已批准总预算内提交；失败后 V02 必须取得该视频的单独费用授权，不得提交 V03。最终视频始终由用户人工验收，见 [AutoDL H3](references/autodl-h3.md)、[验收与学习](references/review-learning.md) 和 [交付契约](references/delivery-contract.md)。
 
@@ -42,10 +42,10 @@ python scripts/workflow_cli.py init `
 
 ## Runtime loop
 
-1. 完成启动清单和预算确认，在启动 JSON 填入 `unit_price_yuan` 或逐项 `prices_by_video`，再调用 `pipeline_runner.py approve-start --batch "批次目录" --approved-budget "批准预算" --estimated-v01-total "V01总价"`。脚本绑定项目 ID/数量、单价、总价、分辨率及工作流；配置变更不继承付费授权。
+1. 完成启动清单和预算确认，在启动 JSON 填入 `unit_price_yuan` 或逐项 `prices_by_video`，并明确 `image_provider`。再调用 `pipeline_runner.py approve-start --batch "批次目录" --approved-budget "批准预算" --estimated-v01-total "V01总价" --image-provider "gpt_web 或 third_party_api"`；第三方 API 还须提供与启动确认单一致的 `--image-api-config` 文件。脚本绑定项目 ID/数量、单价、总价、分辨率、工作流和图片渠道；配置变更不继承付费授权。
 2. 调用 `pipeline_runner.py next` 并只执行返回的一个外部动作。
-3. `BATCH_CONTENT_REQUIRED` 按 `prompt_path` 为指定 `video_ids` 写入内容 JSON，调用 `accept-content --action-id "动作ID"`。`GPT_WEB_IMAGE_REQUIRED` 按 `reference_paths` 上传参考图并完成一次网页生成/下载，再调用 `pipeline_runner.py accept-image --action-id "动作ID"`。动作在返回前已保留次数；恢复时沿用同一 `action_id`，不得自行重发生成。
-4. 图片不进行人工审核，也不调用模型进行二次视觉审核；技术检查和自动晋升由脚本完成。
+3. `BATCH_CONTENT_REQUIRED` 按 `prompt_path` 为指定 `video_ids` 写入内容 JSON，调用 `accept-content --action-id "动作ID"`。`GPT_WEB_IMAGE_REQUIRED` 按 `reference_paths` 上传参考图并完成一次网页生成/下载；`THIRD_PARTY_IMAGE_REQUIRED` 由宿主/API 适配器按动作内非密钥配置生成并下载。两者都调用 `pipeline_runner.py accept-image --action-id "动作ID"` 回传本地文件。动作在返回前已保留次数；恢复时沿用同一 `action_id`，不得自行重发生成或切换渠道。
+4. 图片不进行人工审核，也不进行模型视觉审核；技术检查和自动晋升由脚本完成。
 5. `LOCAL_WORK_REQUIRED` 或 `VIDEO_POLL_PENDING` 时执行 `run-local --batch "批次目录"`；脚本顺序生成首尾帧 payload、执行 AutoDL、保存证据并生成报告。若含 `recovery_required`，先修复列明的本地环境问题，再用同一命令恢复原版本/原 task_id，不重新付费。轮询、下载、哈希、晋升、审计和恢复不得调用 DeepSeek。`run-local --dry-run` 只返回 `DRY_RUN_COMPLETE` 预览，不推进真实进度。
 6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`LOCAL_OUTPUT_REPAIR_REQUIRED` 按 `audit_path` 恢复缺失/损坏的已批准产出，再运行 `run-local`，此分支只审计、不生成、不付费。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
 7. 不得把完整日志粘贴回模型上下文；只读取脚本输出的紧凑 JSON。

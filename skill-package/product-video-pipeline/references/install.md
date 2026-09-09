@@ -72,7 +72,7 @@ AUTODL_AUTH_SCHEME=bearer 或 raw
 - 配置完成后先进行不联网、不扣费的 dry-run，再开始产品任务。
 - API 已接入不等于允许付费；V01 在已批准且绑定的项目费用清单内自动提交，V02 单独批准。
 
-DeepSeek 文本接口的 base_url、模型及密钥通过安全环境配置接入；生图固定使用已登录的 GPT 网页端，不配置第三方生图 API。
+DeepSeek 文本接口的 base_url、模型及密钥通过安全环境配置接入。生图渠道在每个批次启动时必须选择：`GPT 网页端` 使用当前已登录浏览器会话，且禁止服务器端 OpenAI API 调用；`第三方 API` 使用启动确认单中封存的 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`、`batch_budget_yuan`。为第三方渠道设置的只是 `api_key_env` 指定的环境变量，例如在安全环境中设置该变量；绝不把真实凭据写入启动 JSON、配置文件、命令行、日志或聊天内容。渠道批准后批次内锁定，禁止自动切换。
 
 ## 权限与安全说明
 
