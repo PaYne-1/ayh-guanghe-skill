@@ -18,6 +18,17 @@ FORBIDDEN_PRODUCT_APPEARANCE_TERMS = (
     "靠背",
 )
 
+EXTRA_VOICE_PERMISSION_TERMS = (
+    "允许额外人声",
+    "允许额外语音",
+    "允许旁白",
+    "允许画外音",
+    "允许第三人声",
+    "允许背景音乐",
+    "允许BGM",
+    "允许哼声",
+)
+
 PRODUCT_REFERENCE_BLOCK = """【产品参考锁定】
 上传的产品参考图是唯一产品依据。直接使用参考图中的产品，保持结构、部件、比例、连接关系和相对位置完全不变。
 禁止重新设计、补画、删减、替换或推测任何产品部件。不要用文字重新描述产品的颜色、形状、材质或部件外观。"""
@@ -47,6 +58,13 @@ def _reject_product_appearance(text: str) -> None:
     matched = next((term for term in FORBIDDEN_PRODUCT_APPEARANCE_TERMS if term in text), None)
     if matched is not None:
         raise ValueError(f"产品外观不得推测或描述：{matched}")
+
+
+def has_forbidden_product_appearance(text: object) -> bool:
+    """Whether untrusted model prose names a product component appearance."""
+    return isinstance(text, str) and any(
+        term in text for term in FORBIDDEN_PRODUCT_APPEARANCE_TERMS
+    )
 
 
 def _without_contract_blocks(scene: str, blocks: Sequence[str]) -> str:
@@ -192,6 +210,8 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]]) -> li
             _reject_product_appearance(prompt)
         except ValueError:
             issues.append("video.product_appearance_forbidden")
+        if any(term in prompt for term in EXTRA_VOICE_PERMISSION_TERMS):
+            issues.append("video.extra_voice_permission_forbidden")
     required_rules = (
         ("产品参考图是唯一产品依据", "video.reference_lock_missing"),
         ("0–15秒", "video.single_shot_missing"),

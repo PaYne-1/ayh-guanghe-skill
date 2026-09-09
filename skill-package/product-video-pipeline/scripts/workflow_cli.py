@@ -1335,6 +1335,19 @@ def _closing_is_valid(dialogue: str, product_name: str) -> bool:
     return used and has_product and after and benefit and cta
 
 
+def _has_forbidden_product_appearance(text: object) -> bool:
+    """Use the central prompt contract without compiling model content early."""
+    path = Path(__file__).with_name("generation_prompt_contract.py")
+    spec = importlib.util.spec_from_file_location(
+        "product_video_generation_prompt_contract", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 generation_prompt_contract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return bool(module.has_forbidden_product_appearance(text))
+
+
 def validate_content_package(package: Dict[str, object], profile: Dict[str, object]) -> List[str]:
     issues: List[str] = []
     if not isinstance(package, dict):
@@ -1363,6 +1376,11 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
         return list(dict.fromkeys(issues))
     if not package.get("storyboard_prompt", "").strip():
         issues.append("content.storyboard_prompt_missing")
+    if any(
+        _has_forbidden_product_appearance(package[key])
+        for key in ("storyboard_prompt", "last_frame_prompt", "video_prompt")
+    ):
+        issues.append("product.appearance_description_forbidden")
 
     title = str(package.get("publish_title", ""))
     required_title_term = str(profile["required_title_term"])

@@ -199,6 +199,15 @@ def test_video_validator_rejects_duplicated_dialogue(contract, people, segments)
     )
 
 
+def test_video_validator_rejects_extra_voice_permission(contract, people, segments):
+    prompt = contract.compile_video_prompt("公园内自然同行", people, segments)
+    mutated = prompt + "\n允许额外人声作为环境口播。"
+
+    assert "video.extra_voice_permission_forbidden" in contract.validate_video_request(
+        mutated, segments
+    )
+
+
 def test_video_contract_rejects_inferred_appearance(contract, people, segments):
     with pytest.raises(ValueError, match="产品外观"):
         contract.compile_video_prompt("红色车架在阳光下行驶", people, segments)

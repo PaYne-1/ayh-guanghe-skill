@@ -1152,12 +1152,30 @@ def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
     workflow = _load_workflow_cli()
     process = item / "_工作文件/生成过程"
     package = json.loads((process / "策划内容.json").read_text(encoding="utf-8"))
-    parts = [str(package["video_prompt"]), "以下台词逐句由指定角色完整说完："]
-    parts.extend(f"{part['start']}–{part['end']}秒 {part['speaker_id']}：{part['dialogue']}" for part in package["script_segments"])
+    prompt_contract = _load_prompt_contract()
+    compiled = prompt_contract.compile_video_prompt(
+        str(package["video_prompt"]),
+        list(package["people"]),
+        list(package["script_segments"]),
+    )
+    issues = prompt_contract.validate_video_request(
+        compiled, list(package["script_segments"])
+    )
+    if issues:
+        raise ValueError("视频提交提示词预检失败：" + ",".join(issues))
+    workflow.atomic_write_text(process / "视频提交提示词.txt", compiled)
     key = _attempt_key(item)
-    payload = {"prompt": "\n".join(parts), "duration": 15,
-               "resolution": {"768P": "768p竖", "2K": "2K"}[state.approved_manifest["resolution"]],
-               "seed": int(hashlib.sha256((state.manifest_digest + key).encode()).hexdigest()[:12], 16)}
+    payload = {
+        "prompt": compiled,
+        "duration": 15,
+        "resolution": {"768P": "768p竖", "2K": "2K"}[
+            state.approved_manifest["resolution"]
+        ],
+        "seed": int(
+            hashlib.sha256((state.manifest_digest + key).encode()).hexdigest()[:12],
+            16,
+        ),
+    }
     for field, name in (("first_frame", "分镜图.png"), ("last_frame", "尾帧图.png")):
         image = workflow.validated_promoted_artifact_path(item, name)
         if image is None:

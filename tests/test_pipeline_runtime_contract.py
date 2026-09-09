@@ -40,7 +40,7 @@ def package(video_id):
         "publish_title": "爸妈也能轻松上手的电动轮椅到底怎么样", "cover_title": "爸妈会操作",
         "people": [{"id": "P1", "identity": "老人", "gender": "女", "age_feel": "70岁", "position": "左侧", "action": "坐轮椅", "speaks": True}, {"id": "P2", "identity": "家属", "gender": "女", "age_feel": "40岁", "position": "右侧", "action": "提问", "speaks": True}],
         "storyboard_people": ["P1", "P2"],
-        "script_segments": [{"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"}, {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"}, {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"}],
+        "script_segments": [{"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"}, {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"}, {"start": 11, "end": 15, "speaker_id": "P2", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"}],
         "storyboard_prompt": "竖屏9:16，两位女性始终同框，不要文字。", "last_frame_prompt": "合理尾帧，主体前进1至1.5米，人物产品一致。",
         "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，不要背景音乐。",
         "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
@@ -124,6 +124,97 @@ def test_actions_drive_real_prompts_payload_and_review_report(setup_batch, capsy
     result = json.loads(capsys.readouterr().out)
     assert result["kind"] == "USER_FINAL_REVIEW_REQUIRED"
     assert Path(result["report_path"]).is_file()
+
+
+def test_final_video_prompt_preflight_persists_closed_dialogue_contract(setup_batch, capsys):
+    """The paid payload is the compiled contract, never raw model prose."""
+    runner, policy, batch, items, _ = setup_batch
+    action = approve(setup_batch, capsys)
+    accept_content(setup_batch, action, capsys)
+    for index in range(6):
+        next_image(setup_batch, capsys, (index * 20, 70, 120))
+
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["kind"] == "LOCAL_WORK_REQUIRED"
+    payload_path = items[0] / "_工作文件/任务状态/提交请求.json"
+    prompt_path = items[0] / "_工作文件/生成过程/视频提交提示词.txt"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    prompt = payload["prompt"]
+    assert prompt_path.read_text(encoding="utf-8") == prompt
+    for required in (
+        "产品参考图是唯一产品依据",
+        "0–15秒全程一个连续镜头",
+        "固定中远景",
+        "人物全身和产品整体始终完整位于画面安全区",
+        "非当前说话者嘴巴闭合且完全不发声",
+        "清单之外零人声",
+        "不得添加任何额外语音",
+        "不得添加背景音乐",
+    ):
+        assert required in prompt
+    content = package("V001")
+    for segment in content["script_segments"]:
+        binding = f"{segment['start']}–{segment['end']}秒 speaker_id={segment['speaker_id']}（"
+        assert prompt.count(segment["dialogue"]) == 1
+        assert binding in prompt
+    state = runner.load_or_create_state(batch, policy)
+    assert state.budget_ledger == {}
+    assert state.image_budget_ledger == {}
+
+
+@pytest.mark.parametrize("field", ["storyboard_prompt", "last_frame_prompt", "video_prompt"])
+def test_content_validation_rejects_product_appearance_description(field):
+    workflow = module("workflow_cli")
+    profile = json.loads(
+        (SKILL / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json").read_text(encoding="utf-8")
+    )
+    content = package("V001")
+    content[field] = "红色车架在阳光下清晰可见。"
+
+    assert "product.appearance_description_forbidden" in workflow.validate_content_package(
+        content, profile
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate, expected",
+    [
+        (
+            lambda content: content["script_segments"].__setitem__(
+                1, dict(content["script_segments"][1], dialogue=content["script_segments"][0]["dialogue"])
+            ),
+            "视频台词不得重复",
+        ),
+        (
+            lambda content: content.__setitem__("video_prompt", "一镜到底，允许额外人声作为环境口播。"),
+            "video.extra_voice_permission_forbidden",
+        ),
+        (
+            lambda content: content.__setitem__("video_prompt", "红色车架在阳光下清晰可见。"),
+            "产品外观",
+        ),
+    ],
+)
+def test_final_video_prompt_preflight_blocks_invalid_source_before_paid_reservation(
+    setup_batch, capsys, mutate, expected
+):
+    runner, policy, batch, items, _ = setup_batch
+    action = approve(setup_batch, capsys)
+    accept_content(setup_batch, action, capsys)
+    for index in range(3):
+        next_image(setup_batch, capsys, (index * 30, 60, 110))
+    content_path = items[0] / "_工作文件/生成过程/策划内容.json"
+    content = json.loads(content_path.read_text(encoding="utf-8"))
+    mutate(content)
+    write(content_path, content)
+    state = runner.load_or_create_state(batch, policy)
+
+    with pytest.raises(ValueError, match=expected):
+        runner.prepare_payload(batch, items[0], state)
+
+    assert state.budget_ledger == {}
+    assert state.image_budget_ledger == {}
 
 
 def test_next_reservation_is_durable_idempotent_and_budgeted(setup_batch, capsys):
