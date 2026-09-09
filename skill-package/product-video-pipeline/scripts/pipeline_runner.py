@@ -29,6 +29,7 @@ VALID_STATES = {
     "WAITING_PAID_APPROVAL",
     "GENERATING",
     "WAITING_FINAL_REVIEW",
+    "WAITING_USER_FEEDBACK",
     "WAITING_RERUN_APPROVAL",
     "COMPLETED",
     "BLOCKED",
@@ -473,6 +474,9 @@ def _confirmation_manifest(batch_dir: Path) -> dict[str, object]:
         raise PermissionError("缺少启动确认单和费用清单")
     confirmation = json.loads(path.read_text(encoding="utf-8"))
     policy_module = _load_policy_module()
+    run_mode = confirmation.get("run_mode", "learning")
+    if run_mode not in {"learning", "auto"}:
+        raise PermissionError("启动确认单运行模式无效")
     image_provider = policy_module.normalize_image_provider(confirmation.get("image_provider"))
     if image_provider == "gpt_web":
         if confirmation.get("image_api_config") not in (None, {}):
@@ -497,15 +501,90 @@ def _confirmation_manifest(batch_dir: Path) -> dict[str, object]:
     if not isinstance(prices, dict) or set(prices) != set(ids):
         raise PermissionError("启动费用清单必须逐条覆盖全部项目")
     prices = {video_id: str(_positive_authorization_amount(prices[video_id], f"{video_id} 单价")) for video_id in ids}
+    budget = _auto_budget_manifest(confirmation, prices)
     return {
         "video_ids": ids, "item_count": len(ids), "resolution": resolution,
         "duration_seconds": 15, "workflow_id": _load_autodl().WORKFLOW_ID,
         "price_by_video": prices,
         "estimated_v01_total": str(sum((Decimal(p) for p in prices.values()), Decimal("0"))),
-        "max_budget_yuan": str(_positive_authorization_amount(confirmation.get("max_budget_yuan"), "启动预算")),
+        "max_budget_yuan": budget["total_budget_yuan"],
+        "run_mode": run_mode,
+        "startup_authorization": confirmation.get(
+            "startup_authorization",
+            "learning_review_required",
+        ),
         "image_provider": image_provider,
         "image_api_config": image_api_config,
+        **budget,
     }
+
+
+def _auto_budget_manifest(
+    confirmation: dict[str, object], video_prices: dict[str, str]
+) -> dict[str, str]:
+    """Allocate an auto batch's single user budget without merging ledgers."""
+    total = _positive_authorization_amount(
+        confirmation.get("max_budget_yuan"), "启动预算"
+    )
+    reserved_video = sum((Decimal(price) for price in video_prices.values()), Decimal("0"))
+    if confirmation.get("image_provider") == "third_party_api":
+        config = _load_policy_module().normalize_image_api_config(
+            confirmation.get("image_api_config")
+        )
+        initial_images = Decimal(config["unit_price_yuan"]) * Decimal(
+            3 * len(video_prices)
+        )
+    else:
+        initial_images = Decimal("0")
+    image_budget = total - reserved_video
+    return {
+        "total_budget_yuan": str(total),
+        "reserved_v01_video_yuan": str(reserved_video),
+        "initial_image_estimate_yuan": str(initial_images),
+        "image_budget_yuan": str(image_budget),
+    }
+
+
+class LocalAutoConfigurationRequired(PermissionError):
+    pass
+
+
+def _activate_auto_batch(
+    batch: Path, state: RunnerState, policy: dict[str, object]
+) -> None:
+    """Seal a literal auto confirmation as its sole V01 authorization."""
+    confirmation_path = batch / "启动确认单.json"
+    if not confirmation_path.is_file():
+        raise LocalAutoConfigurationRequired("缺少启动确认单")
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    if confirmation.get("run_mode") != "auto":
+        raise LocalAutoConfigurationRequired("自动模式配置缺失")
+    if confirmation.get("startup_authorization") != "initial_user_reply":
+        raise LocalAutoConfigurationRequired("自动模式缺少初始授权")
+    prices = confirmation.get("prices_by_video")
+    ids = [item.name.split("_", 1)[0] for item in _video_items(batch)]
+    if not isinstance(prices, dict) or set(prices) != set(ids):
+        raise LocalAutoConfigurationRequired("自动模式缺少完整逐条视频价格")
+    manifest = _confirmation_manifest(batch)
+    if manifest["image_provider"] == "third_party_api":
+        api_key_env = manifest["image_api_config"]["api_key_env"]
+        if not os.environ.get(api_key_env):
+            raise LocalAutoConfigurationRequired(
+                f"缺少图片 API 密钥环境变量：{api_key_env}"
+            )
+    total = Decimal(manifest["total_budget_yuan"])
+    reserved_video = Decimal(manifest["reserved_v01_video_yuan"])
+    initial_images = Decimal(manifest["initial_image_estimate_yuan"])
+    if reserved_video + initial_images > total:
+        transition(state, "BLOCKED", reason="V01 视频和初始图片预计费用超过总预算")
+        save_state(batch, state)
+        return
+    state.approved_budget = manifest["total_budget_yuan"]
+    state.estimated_v01_total = manifest["reserved_v01_video_yuan"]
+    state.approved_manifest = manifest
+    state.manifest_digest = _load_policy_module().policy_digest(manifest)
+    transition(state, "RUNNING_AUTOMATICALLY", reason="初始回复已授权自动执行 V01")
+    save_state(batch, state)
 
 
 def _approved_image_config(
@@ -541,7 +620,7 @@ def validate_approved_manifest(batch_dir: Path, state: RunnerState) -> None:
     manifest = _confirmation_manifest(batch_dir)
     if manifest != state.approved_manifest or _load_policy_module().policy_digest(manifest) != state.manifest_digest:
         raise PermissionError("实际项目或配置与已批准清单不一致")
-    if Decimal(state.estimated_v01_total) != Decimal(str(manifest["estimated_v01_total"])):
+    if Decimal(state.estimated_v01_total) != Decimal(str(manifest["reserved_v01_video_yuan"])):
         raise PermissionError("预计总价与已批准清单不一致")
 
 
@@ -596,9 +675,26 @@ def _reserve_payment(batch_dir: Path, item_dir: Path, state: RunnerState, reques
     if key in state.budget_ledger:
         raise PermissionError("本版本已有费用保留记录；必须核对原任务，禁止重复付费")
     total = sum((Decimal(row["cost"]) for row in state.budget_ledger.values()), Decimal("0"))
-    limit = Decimal(state.approved_budget) + sum((Decimal(v) for v in state.rerun_budget_by_video.values()), Decimal("0"))
-    if total + cost > limit:
-        raise PermissionError("累计已消费/保留费用超过授权预算")
+    if key.endswith("V01"):
+        v01_total = sum(
+            (Decimal(row["cost"]) for attempt, row in state.budget_ledger.items()
+             if attempt.endswith("V01")),
+            Decimal("0"),
+        )
+        reserved_v01 = Decimal(state.approved_manifest["reserved_v01_video_yuan"])
+        if v01_total + cost > reserved_v01:
+            raise PermissionError("V01 视频费用超过已预留视频预算")
+        image_total = sum(
+            (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
+             if row["status"] in {"reserved", "spent", "unknown"}),
+            Decimal("0"),
+        )
+        if total + image_total + cost > Decimal(state.approved_manifest["total_budget_yuan"]):
+            raise PermissionError("累计图片和 V01 视频费用超过总预算")
+    else:
+        limit = Decimal(state.approved_budget) + sum((Decimal(v) for v in state.rerun_budget_by_video.values()), Decimal("0"))
+        if total + cost > limit:
+            raise PermissionError("累计已消费/保留费用超过授权预算")
     state.payload_bindings[key] = binding
     state.budget_ledger[key] = {"cost": str(cost), "status": "reserved", "request_hash": request_hash, "at": _now(), "binding": binding}
     save_state(batch_dir, state)
@@ -1041,16 +1137,16 @@ def _reserve_image_api_action(
     unit_price = _positive_authorization_amount(
         config["unit_price_yuan"], "图片 API 单价"
     )
-    batch_budget = _positive_authorization_amount(
-        config["batch_budget_yuan"], "图片 API 批次预算"
-    )
+    batch_budget = Decimal(state.approved_manifest["image_budget_yuan"])
+    if not batch_budget.is_finite() or batch_budget < 0:
+        raise ValueError("图片 API 总预算无效")
     used = sum(
         (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
          if row["status"] in {"reserved", "spent", "unknown"}),
         Decimal("0"),
     )
     if used + unit_price > batch_budget:
-        raise ModelBudgetExceeded("图片 API 批次预算已耗尽")
+        raise ModelBudgetExceeded("图片 API 总预算已耗尽")
     action = {
         **action,
         "estimated_cost_yuan": str(unit_price),
@@ -1269,6 +1365,20 @@ def next_action(
     batch_dir: Path, state: RunnerState, policy: dict[str, object]
 ) -> dict[str, object]:
     if state.status == "WAITING_START_APPROVAL":
+        confirmation_path = batch_dir / "启动确认单.json"
+        if confirmation_path.is_file():
+            confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+            if confirmation.get("run_mode") == "auto":
+                try:
+                    _activate_auto_batch(batch_dir, state, policy)
+                except LocalAutoConfigurationRequired as exc:
+                    return {
+                        "kind": "LOCAL_AUTO_CONFIGURATION_REQUIRED",
+                        "reason": str(exc),
+                    }
+                if state.status == "BLOCKED":
+                    return {"kind": "BLOCKED", "reason": state.blocked_reason}
+                return next_action(batch_dir, state, policy)
         return {"kind": "USER_START_APPROVAL_REQUIRED"}
     if state.status == "BLOCKED":
         return {"kind": "BLOCKED", "reason": state.blocked_reason}
@@ -2003,6 +2113,12 @@ def _main_locked(args) -> int:
         elif args.command == "approve-start":
             if state.status != "WAITING_START_APPROVAL":
                 raise ValueError("当前状态不允许重复批准启动")
+            confirmation_path = batch / "启动确认单.json"
+            if not confirmation_path.is_file():
+                raise PermissionError("缺少启动确认单和费用清单")
+            confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+            if confirmation.get("run_mode", "learning") == "auto":
+                raise ValueError("自动模式由初始回复授权，不接受 approve-start")
             approved = _positive_authorization_amount(
                 args.approved_budget, "V01 批准预算"
             )
@@ -2011,10 +2127,6 @@ def _main_locked(args) -> int:
             )
             if estimated > approved:
                 raise ValueError("V01 预计总价必须不超过批准预算")
-            confirmation_path = batch / "启动确认单.json"
-            if not confirmation_path.is_file():
-                raise PermissionError("缺少启动确认单和费用清单")
-            confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
             image_provider, image_api_config = _approved_image_config(
                 confirmation, args.image_provider, args.image_api_config
             )
@@ -2024,7 +2136,7 @@ def _main_locked(args) -> int:
                 or manifest["image_api_config"] != image_api_config
             ):
                 raise PermissionError("图片渠道配置与启动确认单不一致")
-            if estimated != Decimal(str(manifest["estimated_v01_total"])):
+            if estimated != Decimal(str(manifest["reserved_v01_video_yuan"])):
                 raise PermissionError("V01 预计总价与逐条费用清单不一致")
             if approved > Decimal(str(manifest["max_budget_yuan"])):
                 raise PermissionError("批准预算超过启动确认单最高预算")

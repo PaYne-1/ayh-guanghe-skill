@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 IMAGE_PROVIDERS = ("gpt_web", "third_party_api")
 IMAGE_API_FIELDS = (
     "api_name", "base_url", "model", "api_key_env",
-    "unit_price_yuan", "batch_budget_yuan",
+    "unit_price_yuan",
 )
 
 
@@ -71,8 +71,6 @@ def normalize_image_api_config(value: object) -> dict[str, str]:
     for key in IMAGE_API_FIELDS[4:]:
         amount = positive_amount(value.get(key), f"image_api_config.{key}")
         normalized[key] = str(amount)
-    if Decimal(normalized["unit_price_yuan"]) > Decimal(normalized["batch_budget_yuan"]):
-        raise ValueError("单张价格不能超过图片 API 批次预算")
     return normalized
 
 
@@ -95,7 +93,12 @@ def load_policy(skill_root: Path) -> dict[str, Any]:
     if not isinstance(limits, dict) or any(type(limits.get(k)) is not int or limits[k] < 0 for k in keys):
         raise ValueError("模型预算配置无效")
     approvals = value.get("approvals")
-    if approvals != {"startup_budget": True, "v01_within_budget": "automatic", "v02": "user_required", "final_video": "user_required"}:
+    if approvals != {
+        "auto_initial_response_authorizes_v01": True,
+        "learning_startup_budget": True,
+        "v02": "user_required",
+        "final_video": {"auto": "deliver_without_review", "learning": "user_required"},
+    }:
         raise ValueError("授权规则无效")
     autodl = value.get("autodl")
     if not isinstance(autodl, dict) or autodl.get("workflow_id") != "minimax_h3_lightx2v_v5_15s" or autodl.get("duration_seconds") != 15:
@@ -103,7 +106,7 @@ def load_policy(skill_root: Path) -> dict[str, Any]:
     for key in ("poll_interval_seconds", "poll_timeout_seconds"):
         if type(autodl.get(key)) is not int or autodl[key] <= 0:
             raise ValueError(f"AutoDL 轮询规则无效：{key}")
-    states = {"WAITING_START_APPROVAL", "RUNNING_AUTOMATICALLY", "WAITING_PAID_APPROVAL", "GENERATING", "WAITING_FINAL_REVIEW", "WAITING_RERUN_APPROVAL", "COMPLETED", "BLOCKED"}
+    states = {"WAITING_START_APPROVAL", "RUNNING_AUTOMATICALLY", "WAITING_PAID_APPROVAL", "GENERATING", "WAITING_FINAL_REVIEW", "WAITING_USER_FEEDBACK", "WAITING_RERUN_APPROVAL", "COMPLETED", "BLOCKED"}
     if not isinstance(value.get("states"), list) or set(value["states"]) != states or len(value["states"]) != len(states):
         raise ValueError("状态规则无效")
     return value

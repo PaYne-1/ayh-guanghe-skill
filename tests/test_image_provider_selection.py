@@ -41,7 +41,6 @@ def test_third_party_config_requires_non_secret_fields():
         "model": "image-v1",
         "api_key_env": "EXAMPLE_IMAGE_API_KEY",
         "unit_price_yuan": "0.20",
-        "batch_budget_yuan": "5.00",
     }
     assert policy.normalize_image_api_config(valid) == valid
     for key in valid:
@@ -58,6 +57,9 @@ def test_third_party_config_requires_non_secret_fields():
             **valid,
             "base_url": "https://do-not-store@example.test/v1?api_key=do-not-store",
         })
+    assert policy.normalize_image_api_config({
+        **valid, "batch_budget_yuan": "5.00"
+    }) == valid
 
 
 @pytest.fixture
@@ -94,6 +96,8 @@ def test_initialize_batch_requires_provider_and_persists_safe_configuration(init
     gpt_confirmation = json.loads((gpt_context.batch_dir / "启动确认单.json").read_text(encoding="utf-8"))
     assert gpt_confirmation["image_provider"] == "gpt_web"
     assert gpt_confirmation["image_api_config"] == {}
+    assert gpt_confirmation["startup_authorization"] == "initial_user_reply"
+    assert "首次回复授权 V01" in (gpt_context.batch_dir / "批次汇总.md").read_text(encoding="utf-8")
 
     config = {
         "api_name": "Example Images",
@@ -101,7 +105,6 @@ def test_initialize_batch_requires_provider_and_persists_safe_configuration(init
         "model": "image-v1",
         "api_key_env": "EXAMPLE_IMAGE_API_KEY",
         "unit_price_yuan": "0.20",
-        "batch_budget_yuan": "5.00",
     }
     api_context = workflow.initialize_batch(
         **{**initialization_kwargs, "now": datetime(2026, 9, 10, tzinfo=timezone.utc)},
@@ -111,6 +114,7 @@ def test_initialize_batch_requires_provider_and_persists_safe_configuration(init
     api_confirmation = json.loads((api_context.batch_dir / "启动确认单.json").read_text(encoding="utf-8"))
     assert api_confirmation["image_provider"] == "third_party_api"
     assert api_confirmation["image_api_config"] == config
+    assert "batch_budget_yuan" not in api_confirmation["image_api_config"]
 
 
 def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
@@ -136,7 +140,6 @@ def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
         "model": "image-v1",
         "api_key_env": "EXAMPLE_IMAGE_API_KEY",
         "unit_price_yuan": "0.20",
-        "batch_budget_yuan": "5.00",
     }
     config_path = initialization_kwargs["knowledge_dir"].parent / "image-api-config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -155,7 +158,6 @@ def api_config_path(tmp_path):
         "model": "image-v1",
         "api_key_env": "EXAMPLE_IMAGE_API_KEY",
         "unit_price_yuan": "0.20",
-        "batch_budget_yuan": "5.00",
     }
     path = tmp_path / "image-api-config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
@@ -550,10 +552,11 @@ def test_api_budget_exhaustion_emits_no_new_paid_action(api_batch, capsys):
     runner, policy, batch, state = api_batch
     confirmation_path = batch / "启动确认单.json"
     confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
-    confirmation["image_api_config"]["batch_budget_yuan"] = "0.20"
+    confirmation["max_budget_yuan"] = "3.20"
     confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
     state.approved_manifest = runner._confirmation_manifest(batch)
     state.manifest_digest = runner._load_policy_module().policy_digest(state.approved_manifest)
+    state.approved_budget = "3.20"
     first = runner.next_action(batch, state, policy)
     assert settle_valid_image(runner, batch, first) == 0
     capsys.readouterr()

@@ -1287,6 +1287,11 @@ def initialize_batch(
         "total_videos": total_videos,
         "allocation": {point: allocated.count(point) for point in dict.fromkeys(allocated)},
         "run_mode": run_mode,
+        "startup_authorization": (
+            "initial_user_reply"
+            if run_mode == "auto"
+            else "learning_review_required"
+        ),
         "text_provider": text_provider,
         "image_provider": image_provider,
         "image_api_config": normalized_image_api,
@@ -1318,7 +1323,12 @@ def initialize_batch(
     }
     atomic_write_json(batch_dir / "启动确认单.json", confirmation)
     atomic_write_json(batch_dir / "批次任务表.json", {"items": task_rows})
-    atomic_write_text(batch_dir / "批次汇总.md", "# 批次汇总\n\n状态：等待启动确认\n")
+    startup_status = (
+        "自动模式已由首次回复授权 V01，等待逐条价格后连续执行"
+        if run_mode == "auto"
+        else "等待学习模式启动确认"
+    )
+    atomic_write_text(batch_dir / "批次汇总.md", f"# 批次汇总\n\n状态：{startup_status}\n")
     return BatchContext(batch_dir, images, items)
 
 

@@ -9,10 +9,13 @@
     "download_retries": 1
   },
   "approvals": {
-    "startup_budget": true,
-    "v01_within_budget": "automatic",
+    "auto_initial_response_authorizes_v01": true,
+    "learning_startup_budget": true,
     "v02": "user_required",
-    "final_video": "user_required"
+    "final_video": {
+      "auto": "deliver_without_review",
+      "learning": "user_required"
+    }
   },
   "model_budget": {
     "per_video": 6,
@@ -33,6 +36,7 @@
     "WAITING_PAID_APPROVAL",
     "GENERATING",
     "WAITING_FINAL_REVIEW",
+    "WAITING_USER_FEEDBACK",
     "WAITING_RERUN_APPROVAL",
     "COMPLETED",
     "BLOCKED"
