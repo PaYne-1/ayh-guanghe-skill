@@ -618,6 +618,97 @@ def main() -> int:
             assert json.loads((batch / runner.STATE_FILENAME).read_text(encoding="utf-8"))["status"] == "WAITING_USER_FEEDBACK"
         finally:
             runner.tempfile.gettempdir = previous_tempdir
+    # Learning mode remains review-gated: the same offline path must emit a real report.
+    with tempfile.TemporaryDirectory() as learning_temporary:
+        learning_root = Path(learning_temporary)
+        batch = learning_root / "learning-batch"
+        item = batch / "V001_self-test_pending"
+        (item / "_工作文件/任务状态").mkdir(parents=True)
+        product = learning_root / "产品参考.png"
+        Image.new("RGB", (64, 64), "purple").save(product)
+        (batch / "启动确认单.json").write_text(
+            json.dumps(
+                {
+                    "run_mode": "learning", "total_videos": 1,
+                    "resolution": "768P", "duration_seconds": 15,
+                    "max_budget_yuan": "10.00", "unit_price_yuan": "3.00",
+                    "image_provider": "gpt_web", "image_api_config": {},
+                    "product_images": [str(product)],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (item / "_工作文件/任务状态/任务信息.json").write_text(
+            json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+        )
+        previous_tempdir = runner.tempfile.gettempdir
+        runner.tempfile.gettempdir = lambda: str(learning_root / "unrelated-temp")
+        try:
+            def learning_invoke(*args):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert runner.main(list(args)) == 0
+                return json.loads(output.getvalue())
+
+            content_action = learning_invoke(
+                "approve-start", "--batch", str(batch), "--approved-budget", "10.00",
+                "--estimated-v01-total", "3.00", "--image-provider", "gpt_web",
+            )
+            assert content_action["kind"] == "BATCH_CONTENT_REQUIRED"
+            content_dir = Path(content_action["output_dir"])
+            content_dir.mkdir(parents=True, exist_ok=True)
+            (content_dir / "V001.json").write_text(
+                json.dumps(valid_content, ensure_ascii=False), encoding="utf-8"
+            )
+            accepted = learning_invoke(
+                "accept-content", "--batch", str(batch),
+                "--action-id", content_action["action_id"],
+                "--content-dir", str(content_dir),
+                "--profile", str(SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json"),
+            )
+            assert accepted["ok"] is True
+            for color in ("purple", "teal", "gold"):
+                image_action = learning_invoke("next", "--batch", str(batch))
+                assert image_action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+                image = Path(image_action["output_path"])
+                Image.new("RGB", (2160, 3840), color).save(image)
+                learning_invoke(
+                    "accept-image", "--batch", str(batch), "--video-id", "V001",
+                    "--artifact", image_action["artifact"], "--source", str(image),
+                    "--action-id", image_action["action_id"],
+                )
+            assert learning_invoke("next", "--batch", str(batch))["kind"] == "LOCAL_WORK_REQUIRED"
+
+            def offline_learning_runner(batch_dir, item_dir, state, **kwargs):
+                info = runner._task_info(item_dir)
+                info.update({"task_id": "self-test-learning-v01", "request_hash": "self-test-learning-request", "submission_pending": False})
+                runner._write_task_info(item_dir, info)
+                state.budget_ledger["V001:V01"] = {
+                    "cost": "3.00", "status": "spent", "task_id": "self-test-learning-v01",
+                    "request_hash": "self-test-learning-request",
+                }
+                candidate = item_dir / "_工作文件/生成过程/视频候选.mp4"
+                candidate.write_bytes(b"offline-learning-v01")
+                technical = {
+                    "ok": True, "full_decode": True, "has_audio": True,
+                    "duration": 15.0, "width": 1280, "height": 720,
+                    "sha256": runner._sha256(candidate), "candidate": str(candidate.resolve()),
+                }
+                return {"ok": True, "task_id": "self-test-learning-v01", "candidate": str(candidate), "technical": technical}
+
+            original_autodl = runner.run_autodl_item
+            runner.run_autodl_item = offline_learning_runner
+            try:
+                review = learning_invoke("run-local", "--batch", str(batch))
+            finally:
+                runner.run_autodl_item = original_autodl
+            assert review["kind"] == "USER_FINAL_REVIEW_REQUIRED"
+            report_path = Path(review["report_path"])
+            assert report_path.is_absolute() and report_path.is_file()
+            assert "V001" in report_path.read_text(encoding="utf-8")
+        finally:
+            runner.tempfile.gettempdir = previous_tempdir
     print("product-video-pipeline 自检通过（未联网、未产生费用）")
     return 0
 

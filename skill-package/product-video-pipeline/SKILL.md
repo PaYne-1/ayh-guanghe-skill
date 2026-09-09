@@ -22,7 +22,7 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 - 视频固定 0–15 秒、一个连续镜头、**固定中远景**。老人、陪护者和完整产品全程处于安全区；无切镜、跳切、转场、景别变化或新增人物/产品。
 - 台词清单是封闭合同：每句只出现一次并由指定 `speaker_id` 说出；**非当前说话者嘴巴闭合且完全不发声**；**清单之外零人声**、无画外音、无重复、无改词、无 BGM。
 
-详细规则见 [内容契约](references/content-contract.md)、[生图路由](references/image-generation-routing.md)、[工作流](references/workflow.md)、[AutoDL H3](references/autodl-h3.md)、[交付契约](references/delivery-contract.md)。
+详细规则见 [内容契约](references/content-contract.md)、[生图路由](references/image-generation-routing.md)、[工作流](references/workflow.md)、[AutoDL H3](references/autodl-h3.md)、[交付契约](references/delivery-contract.md)。学习复盘的操作入口是 [验收、反馈与学习](references/review-learning.md)：先记录候选经验，再用 `start-rerun` 建立复跑上下文，最后用 `validate-learning` 以 `passed`、`failed` 或 `inconclusive` 记录验证结果。自动模式只读取已验证的正式规则，不把当前自动 V01 的反馈自动升级为规则。
 
 ## 运行
 
@@ -46,4 +46,4 @@ python scripts/workflow_cli.py init `
 
 ## 产出与路径
 
-单条任务第一级只保留 `标题.txt`、`发布正文.txt`、`话题标签.txt`、`分镜图.png`、`尾帧图.png`、`封面图.png`、按发布标题清洗命名的 `.mp4` 和 `_工作文件`。每项都有候选、SHA-256 和事件记录；过程文件只写入 `_工作文件`。自动 V01 交付后等待用户反馈，不把 `WAITING_USER_FEEDBACK` 伪装为 `COMPLETED`。所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`。
+单条任务第一级只保留 `标题.txt`、`发布正文.txt`、`话题标签.txt`、`分镜图.png`、`尾帧图.png`、`封面图.png`、按发布标题清洗命名的 `.mp4` 和 `_工作文件`。过程文件按 `_工作文件/任务状态`、`_工作文件/生成过程`、`_工作文件/验收记录`、`_工作文件/历史版本` 分类。学习模式和 V02 只有 `review-output` 记录明确 `passed` 事件并由 `audit-outputs` 复核后，才可保留一级文件；没有明确通过不得保留一级文件。自动 V01 只按新的技术交付合同例外：技术证据和交付哈希有效时交付并等待反馈，不把 `WAITING_USER_FEEDBACK` 伪装为 `COMPLETED`。所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`。

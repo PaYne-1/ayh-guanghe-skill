@@ -273,6 +273,34 @@ def test_native_4k_unattended_operator_contract_is_complete_and_not_appearance_d
             assert appearance not in prompt_rules
 
 
+def test_task6_remediation_preserves_learning_safety_and_install_contract():
+    install = (SKILL_ROOT / "references/install.md").read_text(encoding="utf-8")
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    content = (SKILL_ROOT / "references/content-contract.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references/workflow.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references/review-learning.md").read_text(encoding="utf-8")
+    wheelchair = (SKILL_ROOT / "references/ayh-wheelchair-rules.md").read_text(encoding="utf-8")
+    self_test = (SKILL_ROOT / "scripts/self_test.py").read_text(encoding="utf-8")
+
+    for field in ("api_name", "base_url", "model", "api_key_env", "unit_price_yuan"):
+        assert field in install
+    assert "batch_budget_yuan" not in install
+    assert "图片 API 批次预算" not in install
+    assert "本批次最高总预算" in install
+
+    for text in (content, workflow):
+        for phrase in ("一镜到底", "连续平稳运镜", "完整双人对话口播"):
+            assert phrase in text
+    for phrase in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本", "review-output", "audit-outputs", "明确通过", "passed"):
+        assert phrase in "\n".join((skill, workflow, review))
+    assert "start-rerun" in skill and "validate-learning" in skill
+    assert "候选经验" in review and "inconclusive" in review and "自动模式只读取正式规则" in review
+    assert "USER_FINAL_REVIEW_REQUIRED" in self_test and "report_path" in self_test
+    diagnostic = wheelchair.split("人工反馈定位知识（不得注入生成提示词）", 1)[1]
+    assert "黑色连续脚踏板" in diagnostic
+    assert "四类生成提示词" in diagnostic
+
+
 def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(
