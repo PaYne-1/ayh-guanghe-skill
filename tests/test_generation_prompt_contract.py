@@ -250,6 +250,31 @@ def test_component_bound_appearance_or_redesign_is_rejected(contract, appearance
         contract.compile_image_prompt(f"自然出行，{appearance}清晰可见。", "分镜图.png")
 
 
+@pytest.mark.parametrize(
+    "appearance",
+    [
+        "车架是红色",
+        "车架为红色",
+        "车架颜色是红色",
+        "车架采用金属材质",
+        "扶手做成弧形",
+        "控制器上有圆形按钮",
+    ],
+)
+def test_component_copula_or_construction_appearance_is_rejected(contract, appearance):
+    with pytest.raises(ValueError, match="产品外观"):
+        contract.compile_image_prompt(f"自然出行，{appearance}。", "分镜图.png")
+
+
+@pytest.mark.parametrize("negated_rule", ["不允许额外人声", "不允许BGM"])
+def test_video_validator_allows_negated_extra_voice_prohibition(
+    contract, people, segments, negated_rule
+):
+    prompt = contract.compile_video_prompt("公园内自然同行", people, segments)
+
+    assert contract.validate_video_request(prompt + "\n" + negated_rule, segments) == []
+
+
 def test_video_contract_requires_two_distinct_people_and_ordered_non_overlapping_segments(
     contract, people, segments
 ):

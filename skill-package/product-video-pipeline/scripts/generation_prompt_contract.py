@@ -89,6 +89,9 @@ _COMPONENT_PREFIX_MODIFIER = re.compile(
 _COMPONENT_SUFFIX_APPEARANCE = re.compile(
     rf"{_COMPONENT_PATTERN}\s*(?:的)?\s*{_APPEARANCE_PATTERN}"
 )
+_COMPONENT_LINKED_APPEARANCE = re.compile(
+    rf"{_COMPONENT_PATTERN}\s*(?:颜色是|采用|使用|做成|制成|上有|带有|具有|是|为)\s*{_APPEARANCE_PATTERN}"
+)
 _COMPONENT_SUFFIX_REDESIGN = re.compile(
     rf"{_COMPONENT_PATTERN}\s*(?:进行|被)?\s*{_COMPONENT_SUFFIX_REDESIGN_PATTERN}"
 )
@@ -130,8 +133,22 @@ def has_forbidden_product_appearance(text: object) -> bool:
     return bool(
         _COMPONENT_PREFIX_MODIFIER.search(text)
         or _COMPONENT_SUFFIX_APPEARANCE.search(text)
+        or _COMPONENT_LINKED_APPEARANCE.search(text)
         or _COMPONENT_SUFFIX_REDESIGN.search(text)
     )
+
+
+def _has_positive_extra_voice_permission(text: str) -> bool:
+    """Treat only an affirmative permission as a conflict with closed audio."""
+    negators = ("不", "不要", "不得", "禁止", "不可", "严禁")
+    for term in EXTRA_VOICE_PERMISSION_TERMS:
+        offset = text.find(term)
+        while offset != -1:
+            prefix = text[max(0, offset - 2):offset]
+            if not any(prefix.endswith(negator) for negator in negators):
+                return True
+            offset = text.find(term, offset + len(term))
+    return False
 
 
 def _without_contract_blocks(scene: str, blocks: Sequence[str]) -> str:
@@ -277,7 +294,7 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]]) -> li
             _reject_product_appearance(prompt)
         except ValueError:
             issues.append("video.product_appearance_forbidden")
-        if any(term in prompt for term in EXTRA_VOICE_PERMISSION_TERMS):
+        if _has_positive_extra_voice_permission(prompt):
             issues.append("video.extra_voice_permission_forbidden")
     required_rules = (
         ("产品参考图是唯一产品依据", "video.reference_lock_missing"),
