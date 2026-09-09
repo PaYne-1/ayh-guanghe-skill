@@ -1127,6 +1127,7 @@ def next_action(
         return {"kind": "USER_START_APPROVAL_REQUIRED"}
     if state.status == "BLOCKED":
         return {"kind": "BLOCKED", "reason": state.blocked_reason}
+    validate_approved_manifest(batch_dir, state)
     if isinstance(state.pending_action, dict) and state.pending_action.get("action_id"):
         row = state.model_actions.get(state.pending_action["action_id"], {})
         if row.get("status") == "reserved":
@@ -1873,6 +1874,7 @@ def _main_locked(args) -> int:
             save_state(batch, state)
         elif args.command == "accept-image":
             _require_running(state)
+            validate_approved_manifest(batch, state)
             item = _find_item_dir(batch, args.video_id)
             row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:
@@ -1892,6 +1894,7 @@ def _main_locked(args) -> int:
             save_state(batch, state)
         elif args.command == "image-failed":
             _require_running(state)
+            validate_approved_manifest(batch, state)
             _find_item_dir(batch, args.video_id)
             row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:

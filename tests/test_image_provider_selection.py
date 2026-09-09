@@ -268,6 +268,36 @@ def test_approved_manifest_rejects_a_later_image_provider_change(
         runner.validate_approved_manifest(batch, state)
 
 
+@pytest.mark.parametrize("command", ["next", "accept-image", "image-failed"])
+def test_runner_rejects_provider_work_after_confirmation_changes(
+    setup_batch, capsys, api_config_path, command
+):
+    action = approve_and_select_image(setup_batch, capsys, "gpt_web")
+    runner, _, batch, _ = setup_batch
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    confirmation["image_provider"] = "third_party_api"
+    confirmation["image_api_config"] = json.loads(api_config_path.read_text(encoding="utf-8"))
+    confirmation_path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    if command == "next":
+        args = ["next", "--batch", str(batch)]
+    elif command == "accept-image":
+        Image.new("RGB", (90, 160), "green").save(action["output_path"])
+        args = [
+            command, "--batch", str(batch), "--video-id", action["video_id"],
+            "--artifact", action["artifact"], "--source", action["output_path"],
+            "--action-id", action["action_id"],
+        ]
+    else:
+        args = [
+            command, "--batch", str(batch), "--video-id", action["video_id"],
+            "--artifact", action["artifact"], "--reason", "provider changed",
+            "--action-id", action["action_id"],
+        ]
+    assert runner.main(args) == 2
+    assert "清单" in json.loads(capsys.readouterr().out)["reason"]
+
+
 @pytest.mark.parametrize("provider", ["gpt_web", "third_party_api"])
 def test_each_approved_provider_promotes_images_through_the_shared_accept_path(
     setup_batch, capsys, provider, api_config_path, monkeypatch
