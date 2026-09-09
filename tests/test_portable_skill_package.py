@@ -26,10 +26,88 @@ def load_script(name: str):
     return module
 
 
+def approve_publish_title(runtime, item: Path, publish_title: str = "出门更轻松") -> Path:
+    candidate = item / "_工作文件" / "生成过程" / "标题候选.txt"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(f"发布标题：{publish_title}\n封面标题：安心出行\n", encoding="utf-8")
+    event = runtime.record_artifact_decision(item, "标题.txt", candidate, "passed", "用户", "标题明确通过")
+    return runtime.promote_approved_artifact(item, event)
+
+
+def configure_paid_runner_fixture(runner, batch, item, state):
+    """Use a real approved manifest and payload in network-fake tests."""
+    from test_pipeline_runtime_contract import package
+    policy = load_script("pipeline_policy.py").load_policy(SKILL_ROOT)
+    ids = [p.name.split("_", 1)[0] for p in runner._video_items(batch)]
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": len(ids), "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}}), encoding="utf-8")
+    state.policy_digest = load_script("pipeline_policy.py").policy_digest(policy)
+    state.approved_budget = "10"
+    state.estimated_v01_total = str(len(ids) * 3)
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.manifest_digest = load_script("pipeline_policy.py").policy_digest(state.approved_manifest)
+    content = batch / (item.name[:4] + ".json")
+    content.write_text(json.dumps(package(item.name[:4]), ensure_ascii=False), encoding="utf-8")
+    load_script("workflow_cli.py").save_content_package(item, content, SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json")
+    for artifact, color in (("分镜图.png", "blue"), ("尾帧图.png", "green"), ("封面图.png", "orange")):
+        raw = batch / (item.name[:4] + artifact)
+        Image.new("RGB", (2160, 3840), color).save(raw)
+        runner.accept_generated_image(item, artifact, raw)
+    payload = item / "_工作文件/任务状态/提交请求.json"
+    payload.unlink(missing_ok=True)
+    runner.save_state(batch, state)
+    runner.prepare_payload(batch, item, state)
+
+
+def seal_image_provider_manifest(
+    runner, batch, state, policy, provider="gpt_web", image_api_config=None
+):
+    """Give offline fixtures the explicit current provider contract."""
+    confirmation_path = batch / "启动确认单.json"
+    confirmation = (
+        json.loads(confirmation_path.read_text(encoding="utf-8"))
+        if confirmation_path.is_file()
+        else {}
+    )
+    confirmation.update({
+        "total_videos": len(runner._video_items(batch)),
+        "resolution": confirmation.get("resolution", "768P"),
+        "duration_seconds": 15,
+        "max_budget_yuan": confirmation.get("max_budget_yuan", "10"),
+        "unit_price_yuan": confirmation.get("unit_price_yuan", "3"),
+        "image_provider": provider,
+        "image_api_config": image_api_config or {},
+    })
+    batch.mkdir(parents=True, exist_ok=True)
+    confirmation_path.write_text(json.dumps(confirmation), encoding="utf-8")
+    state.policy_digest = load_script("pipeline_policy.py").policy_digest(policy)
+    state.approved_budget = confirmation["max_budget_yuan"]
+    state.approved_manifest = runner._confirmation_manifest(batch)
+    state.estimated_v01_total = state.approved_manifest["estimated_v01_total"]
+    state.manifest_digest = load_script("pipeline_policy.py").policy_digest(
+        state.approved_manifest
+    )
+    return state
+
+
+def seal_gpt_web_manifest(runner, batch, state, policy):
+    return seal_image_provider_manifest(runner, batch, state, policy)
+
+
+def offline_video_result(runner, item, task_id="offline-task"):
+    from test_pipeline_runtime_contract import record_offline_submission
+    record_offline_submission(runner, item, task_id)
+    candidate = item / "_工作文件/生成过程/视频候选.mp4"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"offline-validated-video")
+    technical = {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate), "task_id": task_id, "version": f"V{runner._item_retry_count(item) + 1:02d}", "candidate": str(candidate.resolve())}
+    runner._persist_video_evidence(item, technical)
+    return {"ok": True, "task_id": task_id, "candidate": str(candidate), "technical": technical}
+
+
 def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
     text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "name: product-video-pipeline" in text
-    assert "description: Use when" in text
+    assert "description: Use only when the user explicitly says" in text
     assert "Codex" in text
     assert "WorkBuddy" in text
     assert "Hermes" in text
@@ -63,8 +141,14 @@ def test_startup_communication_is_complete_before_any_task_action():
         "已提供",
         "待确认",
         "需要提供",
+        "GPT 网页端",
+        "第三方 API",
+        "必须选择",
+        "本批次最高总预算",
     ):
         assert phrase in startup
+    provider_choice = startup.index("GPT 网页端")
+    assert startup.index("你需要提供的内容") < provider_choice < startup.index("本次配置明细")
 
 
 def test_skill_package_contains_required_portable_resources():
@@ -94,19 +178,251 @@ def test_skill_package_contains_required_portable_resources():
     assert required <= present
 
 
-def test_image_generation_routing_is_fixed_and_cross_agent_safe():
+def test_image_generation_routing_requires_a_locked_provider_and_is_review_free():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(encoding="utf-8")
+    startup = (SKILL_ROOT / "references" / "startup-checklist.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
+    delivery = (SKILL_ROOT / "references" / "delivery-contract.md").read_text(encoding="utf-8")
+    combined = "\n".join((skill, routing, startup, workflow, delivery))
+    required_phrases = (
+        "GPT 网页端",
+        "第三方 API",
+        "必须选择",
+        "批次内锁定",
+        "禁止自动切换",
+        "不进行人工图片审核",
+        "不进行模型视觉审核",
+        "api_key_env",
+        "本批次最高总预算",
+    )
+    for phrase in required_phrases:
+        assert phrase in combined
+    assert "不进行人工图片审核" in combined
+    assert "不进行模型视觉审核" in combined
+    assert "GPT_WEB_IMAGE_REQUIRED" in combined
+    assert "THIRD_PARTY_IMAGE_REQUIRED" in combined
+    assert "gpt_web" in combined and "OpenAI API" in combined
+    assert "Codex 原生生图" not in combined
+    assert "pipeline_runner.py accept-image" in combined
+    for field in (
+        "api_name",
+        "base_url",
+        "model",
+        "api_key_env",
+        "unit_price_yuan",
+    ):
+        assert field in combined
+    assert "batch_budget_yuan" not in combined
 
-    assert "references/image-generation-routing.md" in skill
-    assert "本机 Codex 界面 → ChatGPT 网页端 → 第三方 API 生图" in routing
-    assert "不得调用当前智能体自身的原生生图能力" in routing
-    assert "2160×3840" in routing
-    assert "SHA-256" in routing
-    assert "不得跳级" in routing
-    assert "不得要求用户提供账号密码" in routing
-    assert "dry-run" in routing
-    assert "第三个候选仍不合格" in routing
+
+def test_native_4k_unattended_operator_contract_is_complete_and_not_appearance_descriptive():
+    """The portable operator docs must match the sealed unattended V01 flow."""
+    documents = {
+        relative: (SKILL_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "SKILL.md",
+            "references/startup-checklist.md",
+            "references/content-contract.md",
+            "references/image-generation-routing.md",
+            "references/workflow.md",
+            "references/autodl-h3.md",
+            "references/review-learning.md",
+            "references/delivery-contract.md",
+            "references/ayh-wheelchair-rules.md",
+        )
+    }
+    combined = "\n".join(documents.values())
+    for phrase in (
+        "产品参考图是唯一产品依据",
+        "禁止用文字重新描述产品外观",
+        "原生2160×3840",
+        "禁止本地放大",
+        "固定中远景",
+        "非当前说话者嘴巴闭合且完全不发声",
+        "清单之外零人声",
+        "本批次最高总预算",
+        "首次回复同时授权 V01",
+        "WAITING_USER_FEEDBACK",
+        "真实存在的绝对路径",
+    ):
+        assert phrase in combined
+
+    for stale_global_rule in (
+        "图片 API 批次预算",
+        "batch_budget_yuan",
+        "自动模式图片审核",
+        "自动模式最终视频审核",
+        "最终视频都进入批量人工验收",
+        "原图为 `1152×2048` 时可等比归一化",
+    ):
+        assert stale_global_rule not in combined
+
+    for relative in (
+        "references/content-contract.md",
+        "references/image-generation-routing.md",
+        "references/workflow.md",
+        "references/delivery-contract.md",
+        "references/ayh-wheelchair-rules.md",
+    ):
+        text = documents[relative]
+        assert "产品参考图是唯一产品依据" in text
+        prompt_rules, _, diagnostic = text.partition("人工反馈定位知识（不得注入生成提示词）")
+        assert diagnostic, f"{relative} must retain facts only as diagnostic knowledge"
+        for appearance in ("黑色脚踏板", "车架", "轮胎", "控制器"):
+            assert appearance not in prompt_rules
+
+
+def test_task6_remediation_preserves_learning_safety_and_install_contract():
+    install = (SKILL_ROOT / "references/install.md").read_text(encoding="utf-8")
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    content = (SKILL_ROOT / "references/content-contract.md").read_text(encoding="utf-8")
+    workflow = (SKILL_ROOT / "references/workflow.md").read_text(encoding="utf-8")
+    review = (SKILL_ROOT / "references/review-learning.md").read_text(encoding="utf-8")
+    wheelchair = (SKILL_ROOT / "references/ayh-wheelchair-rules.md").read_text(encoding="utf-8")
+    self_test = (SKILL_ROOT / "scripts/self_test.py").read_text(encoding="utf-8")
+
+    for field in ("api_name", "base_url", "model", "api_key_env", "unit_price_yuan"):
+        assert field in install
+    assert "batch_budget_yuan" not in install
+    assert "图片 API 批次预算" not in install
+    assert "本批次最高总预算" in install
+
+    for text in (content, workflow):
+        for phrase in ("一镜到底", "连续平稳运镜", "完整双人对话口播"):
+            assert phrase in text
+    for phrase in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本", "review-output", "audit-outputs", "明确通过", "passed"):
+        assert phrase in "\n".join((skill, workflow, review))
+    assert "start-rerun" in skill and "validate-learning" in skill
+    assert "候选经验" in review and "inconclusive" in review and "自动模式只读取正式规则" in review
+    assert "USER_FINAL_REVIEW_REQUIRED" in self_test and "report_path" in self_test
+    diagnostic = wheelchair.split("人工反馈定位知识（不得注入生成提示词）", 1)[1]
+    assert "黑色连续脚踏板" in diagnostic
+    assert "四类生成提示词" in diagnostic
+
+
+def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(
+        encoding="utf-8"
+    )
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(
+        encoding="utf-8"
+    )
+    delivery = (SKILL_ROOT / "references" / "delivery-contract.md").read_text(
+        encoding="utf-8"
+    )
+    combined = "\n".join((skill, routing, workflow, delivery))
+
+    for stale_sole_channel_claim in (
+        "文本模型负责内容，GPT 网页负责生图",
+        "GPT 网页图片单独计数",
+        "GPT 一次生成包含准确标题的完整封面",
+        "GPT 一次生成画面、版式和准确标题",
+        "并要求 GPT 在一次生成中完成画面、版式和标题",
+        "GPT 原图为 `1152×2048`",
+    ):
+        assert stale_sole_channel_claim not in combined
+
+    for document in (skill, routing, workflow, delivery):
+        assert "已锁定生图渠道" in document
+    assert "gpt_web_image" in skill
+    assert "image_budget_ledger" in skill
+    assert "GPT 网页端" in routing and "THIRD_PARTY_IMAGE_REQUIRED" in routing
+
+
+def test_operator_docs_show_required_image_provider_and_failure_settlement_contract():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--image-provider gpt_web" in skill
+    assert "--image-provider third_party_api --image-api-config <非敏感JSON路径>" in skill
+    assert "image-failed --submission-state not_sent|sent|unknown" in routing
+    assert "默认 `unknown`" in routing
+    assert "not_sent" in routing and "释放" in routing
+    assert "sent" in routing and "计入" in routing
+    assert "unknown" in routing and "阻止自动重试" in routing
+
+
+def test_skill_runtime_entry_is_compact_and_runner_driven():
+    text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "pipeline_runner.py next" in text
+    assert "只执行返回的一个外部动作" in text
+    assert "不得把完整日志粘贴回模型上下文" in text
+    assert len(text) <= 9000
+
+
+def test_current_source_is_v1_7_with_low_cost_runtime_files():
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
+    for relative in (
+        "pipeline_policy.json",
+        "scripts/pipeline_policy.py",
+        "scripts/pipeline_runner.py",
+    ):
+        assert (SKILL_ROOT / relative).is_file()
+
+
+def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "20260907_批次001"
+    item = batch / "V001_轻便_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        raw = tmp_path / artifact
+        Image.new("RGB", (2160, 3840), color).save(raw)
+        runner.accept_generated_image(item, artifact, raw)
+
+    state = runner.load_or_create_state(batch, policy)
+    seal_gpt_web_manifest(runner, batch, state, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="offline acceptance")
+    runner.save_state(batch, state)
+    before_calls = dict(state.model_calls_by_video)
+    observed = []
+
+    def offline_autodl(*args, **kwargs):
+        observed.append(kwargs.get("dry_run"))
+        return {"ok": True, "dry_run": True, "request_hash": "offline-dry-hash"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", offline_autodl)
+    result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
+
+    assert result["kind"] == "DRY_RUN_COMPLETE"
+    assert observed == [True]
+    assert state.model_calls_by_video == before_calls
+    assert runner.load_or_create_state(batch, policy).status == "RUNNING_AUTOMATICALLY"
+    for artifact in ("分镜图.png", "尾帧图.png", "封面图.png"):
+        assert (item / artifact).is_file()
+
+
+def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.7.0.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        required = {
+            "product-video-pipeline/VERSION",
+            "product-video-pipeline/pipeline_policy.json",
+            "product-video-pipeline/scripts/pipeline_policy.py",
+            "product-video-pipeline/scripts/pipeline_runner.py",
+        }
+        assert required <= names
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.7.0"
+        assert not any(
+            name.endswith(".env")
+            or name.endswith(".pyc")
+            or "__pycache__" in name
+            or "流水线状态.json" in name
+            for name in names
+        )
 
 
 def test_clean_first_level_and_work_file_rules_are_documented():
@@ -117,7 +433,6 @@ def test_clean_first_level_and_work_file_rules_are_documented():
 
     assert "第一级只保留" in skill
     for name in (
-        "视频.mp4",
         "封面图.png",
         "发布正文.txt",
         "话题标签.txt",
@@ -126,16 +441,10 @@ def test_clean_first_level_and_work_file_rules_are_documented():
         "尾帧图.png",
     ):
         assert name in skill
-    for category in ("_工作文件/任务状态", "_工作文件/生成过程", "_工作文件/验收记录", "_工作文件/历史版本"):
-        assert category in workflow
-    assert "_工作文件/任务状态/任务信息.json" in autodl
-    assert '--payload "_工作文件/任务状态/提交请求.json"' in autodl
-    assert '--state "_工作文件/任务状态/提交预览.json"' in autodl
-    assert '--state "_工作文件/任务状态/AutoDL提交结果.json"' in autodl
-    assert "_工作文件/验收记录/自动验收报告.md" in review
-    assert "--title-file _工作文件/生成过程/封面标题.txt" in skill
-    assert "--title-file _工作文件/生成过程/封面标题.txt" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
+    assert "_工作文件" in workflow and "_工作文件" in autodl
+    assert "按发布标题清洗命名的 `.mp4`" in skill
+    assert "真实存在的绝对路径" in workflow
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -145,16 +454,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
     combined = "\n".join((skill, workflow, contract, review))
 
-    assert "产出验收记录.json" in combined
-    assert "明确通过" in skill
-    assert "SHA-256" in workflow
-    assert "没有明确通过" in workflow and "一级目录不保留" in workflow
-    assert "review-output" in skill and "audit-outputs" in skill
-    assert "自动验收" in review and "不能" in review and "最终晋升" in review
-    assert "_工作文件/生成过程/标题.txt" in contract
-    assert "_工作文件/生成过程/发布正文.txt" in contract
-    assert "_工作文件/生成过程/话题标签.txt" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.6.1"
+    assert "SHA-256" in combined
+    assert "WAITING_USER_FEEDBACK" in skill
+    assert "V02" in review
+    assert "产品参考图是唯一产品依据" in contract
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
@@ -223,7 +527,7 @@ def test_automatic_learning_reference_is_complete_and_routed():
     learning = (SKILL_ROOT / "references" / "automatic-learning-rules.md").read_text(
         encoding="utf-8"
     )
-    assert "references/automatic-learning-rules.md" in skill
+    assert "references/automatic-learning-rules.md" not in skill
     assert "用户反馈 → 自动复盘 → V02验证 → 自动升级正式规则 → 下次任务强制加载并执行" in learning
     assert "record-issue" in learning
     assert "validate-learning" in learning
@@ -257,6 +561,7 @@ def test_runtime_scans_first_level_allocates_and_creates_independent_library(tmp
         cover_reference_dir=cover_refs,
         knowledge_dir=knowledge,
         now=datetime(2026, 8, 26, 12, 0, 0),
+        image_provider="gpt_web",
     )
 
     assert [path.name for path in context.product_images] == ["正侧45度.png"]
@@ -315,17 +620,22 @@ def test_organize_item_dir_keeps_only_deliverables_and_categorizes_work_files(tm
     assert result["root_clean"] is True
     assert result["remaining_forbidden"] == []
     assert {path.name for path in item.iterdir()} == {"_工作文件"}
-    assert len(result["output_audit"]["demoted"]) == 7
+    assert len(result["output_audit"]["demoted"]) == 8
     assert (item / "_工作文件" / "任务状态" / "任务信息.json").exists()
     assert (item / "_工作文件" / "任务状态" / "查询结果.json").exists()
     assert (item / "_工作文件" / "生成过程" / "视频提示词.txt").exists()
     assert (item / "_工作文件" / "验收记录" / "自动验收报告.md").exists()
-    assert (item / "_工作文件" / "历史版本" / "视频_V02.mp4").exists()
+    assert any(
+        path.name.startswith("视频_V02_")
+        for path in (item / "_工作文件" / "历史版本" / "已撤换产出").iterdir()
+    )
     assert (item / "_工作文件" / "历史版本" / "旧格式" / "发布正文.md").exists()
     assert (item / "_工作文件" / "历史版本" / "失败版本" / "失败.mp4").exists()
     assert (item / "_工作文件" / "历史版本" / "视频版本" / "V01.mp4").exists()
     demoted_files = list((item / "_工作文件" / "历史版本" / "未通过或待验收").iterdir())
-    assert {path.read_bytes() for path in demoted_files} == {name.encode("utf-8") for name in deliverables}
+    assert {path.read_bytes() for path in demoted_files} == {
+        name.encode("utf-8") for name in deliverables - {"视频.mp4"}
+    }
 
     repeated = runtime.organize_item_dir(item)
     assert repeated["moved"] == []
@@ -401,7 +711,7 @@ def test_real_world_audio_review_names_are_classified_as_review_evidence(tmp_pat
     candidate = tmp_path / "口播音轨验收_双角色清晰版.md"
     candidate.write_text("通过", encoding="utf-8")
 
-    category, relative = runtime.classify_legacy_entry(candidate)
+    category, relative = runtime.classify_legacy_entry(tmp_path, candidate)
 
     assert category == "验收记录"
     assert relative.name == candidate.name
@@ -716,6 +1026,7 @@ def test_review_output_cli_accepts_relative_candidate_and_promotes_passed_file(t
     candidate = item / relative
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(b"approved-video")
+    title_path = approve_publish_title(runtime, item)
 
     exit_code = runtime.main(
         [
@@ -736,7 +1047,8 @@ def test_review_output_cli_accepts_relative_candidate_and_promotes_passed_file(t
     )
 
     assert exit_code == 0
-    assert (item / "视频.mp4").read_bytes() == b"approved-video"
+    assert (item / f"{runtime._publish_title_from_file(item)}.mp4").read_bytes() == b"approved-video"
+    assert title_path.read_text(encoding="utf-8") == "发布标题：出门更轻松\n封面标题：安心出行\n"
 
 
 def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
@@ -753,6 +1065,33 @@ def test_audit_outputs_cli_dry_run_supports_batch_without_changes(tmp_path):
     assert root_output.exists()
 
 
+def test_audit_outputs_allows_absent_title_but_reports_malformed_approved_publish_title(tmp_path):
+    runtime = load_script("workflow_cli.py")
+    absent_title_item = tmp_path / "V001_卖点_待生成"
+    absent_title_item.mkdir()
+
+    absent_title_audit = runtime.audit_promoted_outputs(absent_title_item, dry_run=True)
+
+    assert "视频.mp4" in absent_title_audit["missing"]
+    assert not any(error["artifact_name"] == "视频.mp4" for error in absent_title_audit["errors"])
+
+    malformed_title_item = tmp_path / "V002_卖点_待生成"
+    candidate = malformed_title_item / "_工作文件" / "生成过程" / "标题候选.txt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("发布标题：！！！\n封面标题：安心出行\n", encoding="utf-8")
+    event = runtime.record_artifact_decision(
+        malformed_title_item, "标题.txt", candidate, "passed", "用户", "标题明确通过"
+    )
+    runtime.promote_approved_artifact(malformed_title_item, event)
+
+    malformed_title_audit = runtime.audit_promoted_outputs(malformed_title_item, dry_run=True)
+
+    assert any(
+        error["artifact_name"] == "视频.mp4" and "标题.txt 未包含可用于视频文件名" in error["error"]
+        for error in malformed_title_audit["errors"]
+    )
+
+
 def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path):
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
@@ -767,7 +1106,8 @@ def test_audit_outputs_cli_fails_when_fixed_output_path_is_a_directory(tmp_path)
 def test_organize_cli_propagates_output_audit_errors_and_root_is_not_clean(tmp_path, capsys):
     runtime = load_script("workflow_cli.py")
     item = tmp_path / "V001_卖点_待生成"
-    (item / "视频.mp4").mkdir(parents=True)
+    title_path = approve_publish_title(runtime, item)
+    (item / f"{runtime._publish_title_from_file(item)}.mp4").mkdir(parents=True)
 
     exit_code = runtime.main(["organize", "--item-dir", str(item)])
     output = json.loads(capsys.readouterr().out)
@@ -776,6 +1116,7 @@ def test_organize_cli_propagates_output_audit_errors_and_root_is_not_clean(tmp_p
     assert output["root_clean"] is False
     assert "视频.mp4" in output["remaining_forbidden"]
     assert output["output_audit"]["errors"]
+    assert title_path.exists()
 
 
 def test_content_validator_enforces_confirmed_ayh_contract():
@@ -901,8 +1242,10 @@ def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tm
     )
     assert preview["payload"]["duration"] == 15
     assert preview["payload"]["resolution"] == "768p竖"
-    assert preview["payload"]["first_frame"].startswith("data:image/png;base64,")
-    assert preview["payload"]["last_frame"].startswith("data:image/png;base64,")
+    assert preview["payload"]["ref_image_0"].startswith("data:image/png;base64,")
+    assert preview["payload"]["ref_image_1"].startswith("data:image/png;base64,")
+    assert "first_frame" not in preview["payload"]
+    assert "last_frame" not in preview["payload"]
     assert "aigc_watermark" not in preview["payload"]
     assert "secret" not in json.dumps(preview, ensure_ascii=False)
     assert client.extract_task_id({"task_id": "root-task"}) == "root-task"
@@ -971,15 +1314,15 @@ def test_autodl_reference_uses_current_comfyui_workflow():
     assert "/api/v1/minimax/v2/video_generation" not in text
     assert "first_frame" in text
     assert "last_frame" in text
-    assert "minimax_h3_image_audio_to_video_v2_15s" in text
-    assert "不得用于新任务、V01 或 V02 提交" in text
+    assert "V01_DELIVERED" in text
+    assert "WAITING_USER_FEEDBACK" in text
 
 
 def test_workflow_requires_video_to_match_accepted_storyboard_visuals():
     text = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
-    assert "已通过分镜是视频画面的视觉基准" in text
-    assert "人物完整度、产品角度、构图、亮度、曝光、白平衡和色温" in text
-    assert "自动判为视频不合格" in text
+    assert "产品参考图是唯一产品依据" in text
+    assert "固定中远景" in text
+    assert "不自动判断语义质量" in text
 
 
 def test_rules_require_single_shot_smooth_camera_and_complete_narration():
@@ -989,21 +1332,21 @@ def test_rules_require_single_shot_smooth_camera_and_complete_narration():
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
     assert "禁止切镜、跳切、转场" in workflow
-    assert "缓慢、连续、平稳运镜" in workflow
+    assert "缓慢连续平稳运镜" in workflow
     assert "最多49个汉字" in contract
     assert "自动精简" in contract
-    assert "尾句被截断" in review
-    assert "自动判为不合格" in review
-    assert "全部台词按自然聊天语速在 15 秒内完整说完" in wheelchair
+    assert "台词重复" in review
+    assert "用户反馈后才允许" in review
+    assert "清单之外零人声" in wheelchair
 
 
 def test_first_last_frame_workflow_applies_core_rules_for_full_duration():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "整个0–15秒" in workflow
-    assert "整个 0–15 秒" in autodl
-    assert "一镜到底、连续平稳运镜、完整双人对话口播" in autodl
+    assert "完整 0–15 秒" in workflow
+    assert "覆盖完整 0–15 秒" in autodl
+    assert "固定中远景" in autodl
     assert "首尾帧只加强端点约束" in autodl
 
 
@@ -1013,10 +1356,10 @@ def test_new_videos_use_fixed_first_last_frames_and_native_dialogue():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
-    assert "行驶双人对话合理尾帧模式：固定启用" in startup
-    assert "生成原生双角色对话" in workflow
-    assert "模型原生双角色对话音轨" in autodl
+    assert "minimax_h3_lightx2v_v5_15s" in skill
+    assert "首次回复同时授权 V01" in startup
+    assert "清单之外零人声" in workflow
+    assert "封闭双角色原生音轨" in autodl
     assert "minimax_h3_image_audio_to_video_v2_15s" not in skill
 
 
@@ -1026,12 +1369,10 @@ def test_dialogue_scripts_require_distinct_speakers_without_user_listening_gate(
     review = (SKILL_ROOT / "references" / "review-learning.md").read_text(encoding="utf-8")
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
-    assert "每条脚本必须恰好包含" in workflow
-    assert "两个不同的 `speaker_id`" in workflow
-    assert "成片必须逐句核验" in workflow
-    assert "必须恰好是两个一致且不同的 ID" in contract
-    assert "老人自问自答" in review
-    assert "角色身份不得固定为女儿" in wheelchair
+    assert "speaker_id" in workflow
+    assert "恰好为老人和一名陪护者/家属" in contract
+    assert "同一人包办" in wheelchair
+    assert "清单之外零人声" in workflow
 
 
 def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
@@ -1039,11 +1380,11 @@ def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
     workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(encoding="utf-8")
     autodl = (SKILL_ROOT / "references" / "autodl-h3.md").read_text(encoding="utf-8")
 
-    assert "每条项目固定为轮椅真实向前行驶" in skill
-    assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
+    assert "固定中远景" in skill
+    assert "minimax_h3_lightx2v_v5_15s" in skill
     assert "2160×3840" in workflow
-    assert "约 1–1.5 米" in workflow
-    assert "尾帧不得复用首帧" in autodl
+    assert "尾帧" in workflow
+    assert "SHA-256 不同" in autodl
     assert "first_frame" in autodl and "last_frame" in autodl
 
 
@@ -1052,13 +1393,11 @@ def test_dialogue_roles_are_relationship_agnostic_and_end_with_order_cta():
     wheelchair = (SKILL_ROOT / "references" / "ayh-wheelchair-rules.md").read_text(encoding="utf-8")
 
     assert "陪护者/家属" in contract
-    assert "儿子、女儿、孙子、孙女" in contract
-    assert "提问者提出问题" in contract
-    assert "老人回答卖点" in contract
+    assert "一个购买前问题" in contract
+    assert "唯一卖点" in contract
     assert "下单类行动指令" in contract
-    assert "角色身份不得固定为女儿" in wheelchair
-    assert "自然看向对方" in wheelchair
-    assert "老人自问自答" in wheelchair
+    assert "身份不固定为女儿" in wheelchair
+    assert "非当前说话者嘴巴闭合且完全不发声" in wheelchair
 
 
 def test_reasonable_tail_review_keeps_hard_failures_and_user_final_decision():
@@ -1066,10 +1405,9 @@ def test_reasonable_tail_review_keeps_hard_failures_and_user_final_decision():
 
     assert "自然视角变化" in review
     assert "轻微亮度波动" in review
-    assert "不得单独自动判为硬失败" in review
-    assert "切镜、人物裁切、产品结构变形" in review
-    assert "用户明确验收结论为最终状态" in review
-    assert "保留自动检查证据" in review
+    assert "技术证据" in review
+    assert "用户反馈" in review
+    assert "V02" in review
 
 
 def test_review_report_contains_one_card_per_video(tmp_path):
@@ -1089,7 +1427,9 @@ def test_review_report_contains_one_card_per_video(tmp_path):
             qa = item / "自动验收报告.md"
         state.write_text(json.dumps({"video_id": video_id, "task_id": f"task-{video_id}"}), encoding="utf-8")
         qa.write_text(f"{video_id} 自动检查通过", encoding="utf-8")
-        (item / "视频.mp4").write_bytes(b"mp4")
+        candidate = item / "_工作文件/生成过程/视频候选.mp4"
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"mp4")
     report = runtime.build_review_report(batch)
     html = report.read_text(encoding="utf-8")
     assert report.name == "批次验收报告.html"
@@ -1107,7 +1447,8 @@ def test_review_report_shows_candidate_video_without_treating_unapproved_root_as
     candidate = item / "_工作文件" / "生成过程" / "候选视频.mp4"
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(b"candidate-video")
-    (item / "视频.mp4").write_bytes(b"unapproved-video")
+    approve_publish_title(runtime, item)
+    (item / f"{runtime._publish_title_from_file(item)}.mp4").write_bytes(b"unapproved-video")
 
     unapproved_html = runtime.build_review_report(batch).read_text(encoding="utf-8")
     assert "<video controls" in unapproved_html
@@ -1500,6 +1841,7 @@ def test_initialize_batch_records_matching_formal_rules(tmp_path):
         cover_reference_dir=covers,
         knowledge_dir=knowledge,
         now=datetime(2026, 8, 29, 12, 0, 0),
+        image_provider="gpt_web",
     )
 
     confirmation = json.loads((context.batch_dir / "启动确认单.json").read_text(encoding="utf-8"))
@@ -1611,7 +1953,15 @@ def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
     batch.mkdir()
     item = batch / "V001_卖点_待生成"
     runtime.ensure_work_dirs(item)
-    task = {"video_id": "V001", "retry_count": 0, "status": "REVIEW_FAILED"}
+    task = {
+        "video_id": "V001",
+        "retry_count": 0,
+        "status": "REVIEW_FAILED",
+        "task_id": "v01-task",
+        "request_id": "v01-request",
+        "request_hash": "v01-hash",
+        "estimated_cost_yuan": "3.00",
+    }
     runtime.atomic_write_json(runtime.work_path(item, "任务状态", "任务信息.json"), task)
     runtime.atomic_write_json(batch / "批次任务表.json", {"items": [task]})
 
@@ -1621,6 +1971,9 @@ def test_start_rerun_allows_only_v02_and_updates_batch_table(tmp_path):
     table = json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))
     assert updated["retry_count"] == 1
     assert updated["status"] == "V02_READY"
+    assert updated["task_id"] is None
+    assert updated["request_hash"] is None
+    assert updated["submission_history"][-1]["version"] == "V01"
     assert table["items"][0]["retry_count"] == 1
     assert runtime.work_path(item, "历史版本", "视频版本/V02_唯一一次重跑").is_dir()
     with pytest.raises(ValueError, match="V02"):
@@ -1649,6 +2002,33 @@ def test_self_test_covers_learning_resources_and_commands():
     assert "start-rerun" in text
 
 
+def test_compact_pipeline_policy_is_versioned_with_allowed_image_providers():
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    assert policy["version"] == 1
+    assert policy["image"] == {
+        "allowed_providers": ["gpt_web", "third_party_api"],
+        "human_review": False,
+        "model_visual_review": False,
+        "target_width": 2160,
+        "target_height": 3840,
+        "download_retries": 1,
+    }
+    assert policy["approvals"] == {
+        "auto_initial_response_authorizes_v01": True,
+        "learning_startup_budget": True,
+        "v02": "user_required",
+        "final_video": {"auto": "deliver_without_review", "learning": "user_required"},
+    }
+    assert policy["model_budget"]["per_video"] == 6
+
+
+def test_policy_digest_is_stable_for_key_order():
+    runtime = load_script("pipeline_policy.py")
+    left = {"b": 2, "a": 1}
+    right = {"a": 1, "b": 2}
+    assert runtime.policy_digest(left) == runtime.policy_digest(right)
+
+
 def test_cover_cli_accepts_utf8_title_file(tmp_path):
     storyboard = tmp_path / "分镜图.png"
     reference = tmp_path / "参考图.png"
@@ -1675,3 +2055,1400 @@ def test_cover_cli_accepts_utf8_title_file(tmp_path):
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     image = Image.open(output)
     assert image.text["cover_title"] == "爸妈会操作"
+
+
+def test_runner_state_is_atomic_and_resumable(tmp_path):
+    policy_module = load_script("pipeline_policy.py")
+    runner = load_script("pipeline_runner.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "20260907_批次001"
+    batch.mkdir()
+
+    state = runner.load_or_create_state(batch, policy)
+    assert state.status == "WAITING_START_APPROVAL"
+    assert state.policy_digest == policy_module.policy_digest(policy)
+
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="预算已确认")
+    runner.save_state(batch, state)
+    restored = runner.load_or_create_state(batch, policy)
+
+    assert restored.status == "RUNNING_AUTOMATICALLY"
+    assert restored.history[-1]["reason"] == "预算已确认"
+    assert not (batch / "流水线状态.json.tmp").exists()
+
+
+def test_runner_rejects_unknown_state(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+
+    with pytest.raises(ValueError, match="未知状态"):
+        runner.transition(state, "DO_WHATEVER")
+
+
+def test_native_4k_web_image_is_auto_promoted_without_resampling(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    raw = tmp_path / "gpt-result.png"
+    Image.new("RGB", (2160, 3840), "navy").save(raw)
+
+    result = runner.accept_generated_image(item, "分镜图.png", raw)
+
+    promoted = item / "分镜图.png"
+    assert result["ok"] is True
+    assert result["review"] == "skipped_by_policy"
+    assert result["provider"] == "gpt_web"
+    assert Image.open(promoted).size == (2160, 3840)
+    events = json.loads(
+        (item / "_工作文件" / "验收记录" / "产出验收记录.json").read_text(encoding="utf-8")
+    )
+    assert events["events"][-1]["confirmed_by"] == "batch-auto-authorization"
+
+
+def test_web_image_rejects_non_native_dimensions_without_resampling(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    source = tmp_path / "square.png"
+    Image.new("RGB", (1024, 1024), "white").save(source)
+    with pytest.raises(ValueError, match="原生2160×3840"):
+        runner.normalize_web_image(source, tmp_path / "normalized.png")
+
+
+def test_storyboard_and_last_frame_must_have_distinct_hashes(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    source = tmp_path / "same.png"
+    Image.new("RGB", (2160, 3840), "green").save(source)
+    runner.accept_generated_image(item, "分镜图.png", source)
+    with pytest.raises(ValueError, match="尾帧不得与分镜相同"):
+        runner.accept_generated_image(item, "尾帧图.png", source)
+
+
+def test_storyboard_reacceptance_cannot_match_promoted_last_frame(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    item = tmp_path / "V001_卖点_待生成"
+    storyboard_source = tmp_path / "storyboard.png"
+    last_frame_source = tmp_path / "last-frame.png"
+    Image.new("RGB", (2160, 3840), "navy").save(storyboard_source)
+    Image.new("RGB", (2160, 3840), "green").save(last_frame_source)
+
+    runner.accept_generated_image(item, "分镜图.png", storyboard_source)
+    runner.accept_generated_image(item, "尾帧图.png", last_frame_source)
+    storyboard = item / "分镜图.png"
+    storyboard_before = storyboard.read_bytes()
+    approval_log = item / "_工作文件" / "验收记录" / "产出验收记录.json"
+    events_before = json.loads(approval_log.read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError, match="分镜不得与尾帧相同"):
+        runner.accept_generated_image(item, "分镜图.png", last_frame_source)
+
+    assert storyboard.read_bytes() == storyboard_before
+    assert json.loads(approval_log.read_text(encoding="utf-8")) == events_before
+
+
+def test_model_budget_blocks_only_model_dependent_work():
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.model_calls_by_video["V001"] = policy["model_budget"]["per_video"]
+    with pytest.raises(runner.ModelBudgetExceeded, match="V001"):
+        runner.consume_model_call(state, policy, video_id="V001")
+
+
+@pytest.mark.parametrize(
+    ("provider", "kind"),
+    [
+        ("gpt_web", "GPT_WEB_IMAGE_REQUIRED"),
+        ("third_party_api", "THIRD_PARTY_IMAGE_REQUIRED"),
+    ],
+)
+def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, kind):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    (process / "分镜提示词.txt").write_text("生成轮椅分镜", encoding="utf-8")
+    (process / "策划内容.json").write_text("{}", encoding="utf-8")
+    product = tmp_path / "产品参考.png"
+    Image.new("RGB", (64, 64), "navy").save(product)
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"product_images": [str(product)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    image_api_config = (
+        {
+            "api_name": "Offline test images",
+            "base_url": "https://images.example.test/v1",
+            "model": "offline-image-v1",
+            "api_key_env": "OFFLINE_TEST_IMAGE_API_KEY",
+            "unit_price_yuan": "0.20",
+        }
+        if provider == "third_party_api"
+        else None
+    )
+    seal_image_provider_manifest(
+        runner, batch, state, policy, provider, image_api_config
+    )
+
+    action = runner.next_action(batch, state, policy)
+
+    assert {k: action[k] for k in ("kind", "video_id", "artifact", "prompt_path", "output_path")} == {
+        "kind": kind,
+        "video_id": "V001",
+        "artifact": "分镜图.png",
+        "prompt_path": str((process / "分镜提交提示词.txt").resolve()),
+        "output_path": str((process / "生图原始分镜.png").resolve()),
+    }
+    assert action["provider"] == provider
+    assert (action["width"], action["height"], action["size"]) == (2160, 3840, "2160x3840")
+    assert action["native_resolution_required"] is True
+    if provider == "third_party_api":
+        assert action["api_config"] == image_api_config
+        assert action["request_parameters"] == {"width": 2160, "height": 3840}
+    else:
+        assert "api_config" not in action
+    assert "prompt" not in action
+
+
+def test_second_image_technical_failure_blocks_the_item():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    first = runner.record_image_failure(
+        state, video_id="V001", artifact="分镜图.png", reason="下载为空"
+    )
+    second = runner.record_image_failure(
+        state, video_id="V001", artifact="分镜图.png", reason="仍然为空"
+    )
+    assert first["kind"] == "IMAGE_FAILURE_RECORDED"
+    assert first["attempt"] == 2
+    assert second["kind"] == "ITEM_BLOCKED"
+    assert state.status != "BLOCKED"
+    assert state.item_failures["V001"]["kind"] == "image"
+
+
+def test_batch_content_is_accepted_in_one_deterministic_operation(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    (batch / "V001_甲_待生成").mkdir(parents=True)
+    (batch / "V002_乙_待生成").mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    for video_id in ("V001", "V002"):
+        (content_dir / f"{video_id}.json").write_text("{}", encoding="utf-8")
+    calls = []
+    fake_workflow = type("Workflow", (), {"save_content_package": staticmethod(lambda item, content, profile: calls.append((item, content, profile)))})
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+
+    result = runner.accept_batch_content(batch, content_dir, tmp_path / "profile.json")
+
+    assert result == {"ok": True, "accepted": ["V001", "V002"]}
+    assert len(calls) == 2
+
+
+def test_runner_poll_and_download_do_not_increment_model_calls(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (state_dir / "提交请求.json").write_text(
+        json.dumps({
+            "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
+            "duration": 15,
+            "resolution": "768p竖",
+            "first_frame": "data:image/png;base64,AAAA",
+            "last_frame": "data:image/png;base64,BBBB",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+    state.model_calls_by_video["V001"] = 2
+
+    configure_paid_runner_fixture(runner, batch, item, state)
+
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: {"task_id": "task-1", "request_hash": "hash-1"})
+    monkeypatch.setattr(runner, "_poll_item", lambda *a, **k: {"status": "completed", "url": "https://example.invalid/video.mp4"})
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: process / "视频候选.mp4")
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True, "sha256": "offline-sha", "full_decode": True})
+
+    result = runner.run_autodl_item(batch, item, state, api_key="test", dry_run=False)
+
+    assert result["ok"] is True
+    assert state.model_calls_by_video["V001"] == 2
+    recorded = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    assert recorded["submission_pending"] is False
+
+
+def test_existing_task_id_prevents_second_paid_submit(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "task_id": "existing-task"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: pytest.fail("must not submit"))
+    monkeypatch.setattr(
+        runner,
+        "_poll_item",
+        lambda *a, **k: {
+            "status": "completed",
+            "url": "https://example.invalid/existing.mp4",
+        },
+    )
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: tmp_path / "video.mp4")
+    monkeypatch.setattr(runner, "validate_video_file", lambda *a, **k: {"ok": True, "sha256": "offline-sha", "full_decode": True})
+
+    result = runner.run_autodl_item(batch, item, runner.RunnerState.new("digest"), api_key="test")
+
+    assert result["resumed_task_id"] == "existing-task"
+
+
+def test_paid_v01_requires_confirmed_total_within_budget(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "12.00"
+    with pytest.raises(PermissionError, match="超过批准预算"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 0}, "V001")
+
+
+def test_v02_requires_separate_video_authorization():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    with pytest.raises(PermissionError, match="V02 单独付费授权"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+    state.rerun_budget_by_video["V001"] = "3.00"
+    runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+
+
+def test_existing_request_hash_without_task_id_blocks_resubmit(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "request_hash": "existing-hash"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: pytest.fail("must not submit"))
+
+    state = runner.RunnerState.new("digest")
+    result = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert result["status"] == "RECONCILIATION_REQUIRED"
+    assert result["request_hash"] == "existing-hash"
+    assert state.item_failures["V001"]["kind"] == "reconciliation"
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "missing_task_id"])
+def test_ambiguous_paid_submit_is_persisted_and_never_submitted_twice(
+    tmp_path, monkeypatch, outcome
+):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    calls = []
+
+    def ambiguous_submit(*args, **kwargs):
+        calls.append(kwargs["dry_run"])
+        if kwargs["dry_run"]:
+            return {"dry_run": True, "request_hash": "stable-hash"}
+        pending_before_post = json.loads(
+            (state_dir / "任务信息.json").read_text(encoding="utf-8")
+        )
+        assert pending_before_post["submission_pending"] is True
+        assert pending_before_post["request_hash"] == "stable-hash"
+        if outcome == "timeout":
+            raise RuntimeError("provider accepted request but response timed out")
+        return {"request_hash": "stable-hash"}
+
+    monkeypatch.setattr(runner, "_submit_item", ambiguous_submit)
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    configure_paid_runner_fixture(runner, batch, item, state)
+    first = runner.run_autodl_item(batch, item, state, api_key="test")
+    persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    second = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert first["status"] == "RECONCILIATION_REQUIRED"
+    assert second["status"] == "RECONCILIATION_REQUIRED"
+    assert persisted["submission_pending"] is True
+    assert persisted["request_hash"] == "stable-hash"
+    assert not (state_dir / "任务信息.json.tmp").exists()
+    assert calls == [True, False]
+    assert state.item_failures["V001"]["kind"] == "reconciliation"
+
+
+def test_task_recording_ambiguity_preserves_task_identity_and_resumes_get_only(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    calls = []
+
+    def accepted_submit(*args, **kwargs):
+        calls.append(kwargs["dry_run"])
+        if kwargs["dry_run"]:
+            return {"request_hash": "stable-hash"}
+        return {
+            "task_id": "accepted-task",
+            "request_id": "accepted-request",
+            "request_hash": "stable-hash",
+        }
+
+    def fail_record(*args, **kwargs):
+        raise OSError("disk error")
+
+    failing_workflow = type(
+        "Workflow", (), {"record_task": staticmethod(fail_record)}
+    )
+    monkeypatch.setattr(runner, "_submit_item", accepted_submit)
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    configure_paid_runner_fixture(runner, batch, item, state)
+    real_workflow = runner._load_workflow_cli()
+    monkeypatch.setattr(real_workflow, "record_task", fail_record)
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: real_workflow)
+    monkeypatch.setattr(runner, "_poll_item", lambda *a, **k: {"status": "poll_timeout"})
+    first = runner.run_autodl_item(batch, item, state, api_key="test")
+    persisted = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
+    second = runner.run_autodl_item(batch, item, state, api_key="test")
+
+    assert first["status"] == "RECONCILIATION_REQUIRED"
+    assert second["status"] == "poll_timeout"
+    assert persisted["submission_pending"] is True
+    assert persisted["task_id"] == "accepted-task"
+    assert persisted["request_id"] == "accepted-request"
+    assert calls == [True, False]
+
+
+def test_paid_v01_requires_both_budget_values_and_v03_is_forbidden():
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "GENERATING"
+
+    with pytest.raises(PermissionError, match="缺少 V01"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 0}, "V001")
+
+    with pytest.raises(PermissionError, match="禁止提交 V03"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 2}, "V001")
+
+
+@pytest.mark.parametrize("retry_count", [-1, 3, "bad", None])
+def test_paid_submit_rejects_invalid_retry_count(retry_count):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "GENERATING"
+    state.approved_budget = "10.00"
+    state.estimated_v01_total = "3.00"
+
+    with pytest.raises(PermissionError, match="V03|版本"):
+        runner.assert_paid_submit_allowed(
+            state, {"retry_count": retry_count}, "V001"
+        )
+
+
+@pytest.mark.parametrize(
+    "amount", ["", "0", "-0.01", "NaN", "Infinity", "not-money"]
+)
+def test_v02_authorization_amount_must_be_finite_and_positive(amount):
+    runner = load_script("pipeline_runner.py")
+    state = runner.RunnerState.new("digest")
+    state.status = "RUNNING_AUTOMATICALLY"
+    state.rerun_budget_by_video["V001"] = amount
+
+    with pytest.raises(PermissionError, match="有限正数"):
+        runner.assert_paid_submit_allowed(state, {"retry_count": 1}, "V001")
+
+
+def test_runner_uses_batch_confirmation_resolution_for_2k_video(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "task_id": "existing-task"}),
+        encoding="utf-8",
+    )
+    (batch / "启动确认单.json").write_text(
+        json.dumps({"resolution": "2K"}), encoding="utf-8"
+    )
+    observed = {}
+    monkeypatch.setattr(
+        runner,
+        "_poll_item",
+        lambda *a, **k: {
+            "status": "completed",
+            "url": "https://example.invalid/video.mp4",
+        },
+    )
+    monkeypatch.setattr(runner, "_download_item", lambda *a, **k: tmp_path / "video.mp4")
+
+    def validate(path, expected_resolution):
+        observed["resolution"] = expected_resolution
+        return {"ok": True, "sha256": "offline-sha", "full_decode": True}
+
+    monkeypatch.setattr(runner, "validate_video_file", validate)
+
+    result = runner.run_autodl_item(
+        batch, item, runner.RunnerState.new("digest"), api_key="test"
+    )
+
+    assert result["ok"] is True
+    assert observed["resolution"] == "2K"
+
+
+def test_validate_video_file_uses_argument_list_ffprobe_and_returns_compact_result(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    candidate = tmp_path / "候选 视频.mp4"
+    candidate.write_bytes(b"not-empty")
+    observed = {}
+
+    def fake_run(arguments, **kwargs):
+        if arguments[0] == "ffmpeg":
+            observed["decode_arguments"] = arguments
+            return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+        observed["arguments"] = arguments
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video", "width": 768, "height": 1365},
+                        {"codec_type": "audio"},
+                    ],
+                    "format": {"duration": "15.25"},
+                }
+            ),
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner.validate_video_file(candidate, "768p竖")
+
+    assert observed["arguments"] == [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_streams",
+        "-show_format",
+        "-of",
+        "json",
+        str(candidate.resolve()),
+    ]
+    assert observed["kwargs"] == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+    }
+    assert result["ok"] is True
+    assert result["duration"] == 15.25
+    assert result["has_audio"] is True
+    assert result["full_decode"] is True
+    assert observed["decode_arguments"][0] == "ffmpeg"
+    assert result["candidate"] == str(candidate.resolve())
+
+
+def test_validate_video_file_rejects_missing_audio(tmp_path, monkeypatch):
+    runner = load_script("pipeline_runner.py")
+    candidate = tmp_path / "candidate.mp4"
+    candidate.write_bytes(b"not-empty")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0],
+            0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video", "width": 768, "height": 1365}
+                    ],
+                    "format": {"duration": "15"},
+                }
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="音轨"):
+        runner.validate_video_file(candidate, "768P")
+
+
+def test_runner_cli_returns_one_compact_json_action(tmp_path):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "next",
+            "--batch",
+            str(batch),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    action = json.loads(result.stdout)
+    assert action == {"kind": "USER_START_APPROVAL_REQUIRED"}
+    assert result.stdout.count("\n") == 1
+    assert len(result.stdout) < 512
+
+
+def test_runner_help_exposes_only_supported_commands():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    commands = (
+        "status",
+        "approve-start",
+        "next",
+        "accept-content",
+        "accept-image",
+        "image-failed",
+        "run-local",
+        "approve-rerun",
+        "complete-review",
+    )
+    for command in commands:
+        assert command in result.stdout
+
+
+def test_run_local_dry_run_preserves_live_progress(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_卖点_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (2160, 3840), color).save(source)
+        runner.accept_generated_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    seal_gpt_web_manifest(runner, batch, state, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    before_calls = dict(state.model_calls_by_video)
+    observed = []
+
+    def fake_run(batch_dir, item_dir, runner_state, *, dry_run=False):
+        observed.append((batch_dir, item_dir, runner_state, dry_run))
+        return {"ok": True, "dry_run": True, "request_hash": "dry-hash"}
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_run)
+
+    result = runner.run_local_until_gate(batch, state, policy, dry_run=True)
+
+    assert result["kind"] == "DRY_RUN_COMPLETE"
+    assert state.model_calls_by_video == before_calls
+    assert observed == [(batch, item, state, True)]
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "WAITING_START_APPROVAL"
+
+
+def test_runner_approve_start_rejects_non_finite_budget_as_one_json(tmp_path):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_ROOT / "scripts" / "pipeline_runner.py"),
+            "approve-start",
+            "--batch",
+            str(batch),
+            "--approved-budget",
+            "NaN",
+            "--estimated-v01-total",
+            "1.00",
+            "--image-provider",
+            "gpt_web",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["kind"] == "COMMAND_REJECTED"
+    state = json.loads((batch / "流水线状态.json").read_text(encoding="utf-8"))
+    assert state["status"] == "WAITING_START_APPROVAL"
+    assert state["approved_budget"] == ""
+
+
+def test_run_local_collects_v01_failure_and_continues_remaining_items(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    items = [
+        batch / "V001_甲_待生成",
+        batch / "V002_乙_待生成",
+    ]
+    color_sets = (("blue", "green", "orange"), ("red", "yellow", "purple"))
+    for item, colors in zip(items, color_sets):
+        item.mkdir(parents=True)
+        artifacts = ("分镜图.png", "尾帧图.png", "封面图.png")
+        for artifact, color in zip(artifacts, colors):
+            source = tmp_path / f"{item.name}_{artifact}"
+            Image.new("RGB", (2160, 3840), color).save(source)
+            runner.accept_generated_image(item, artifact, source)
+
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    observed = []
+
+    for item in items:
+        configure_paid_runner_fixture(runner, batch, item, state)
+
+    def fake_run(batch_dir, item_dir, runner_state, *, dry_run=False):
+        video_id = item_dir.name.split("_", 1)[0]
+        observed.append(video_id)
+        if video_id == "V001":
+            from test_pipeline_runtime_contract import record_offline_submission
+            record_offline_submission(runner, item_dir, "failed-v01")
+            return {"ok": False, "status": "failed", "reason": "provider failed"}
+        return offline_video_result(runner, item_dir, "task-2")
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_run)
+
+    result = runner.run_local_until_gate(batch, state, policy)
+
+    assert observed == ["V001", "V002"]
+    assert result["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert result["video_ids"] == ["V001"]
+    assert state.status == "WAITING_RERUN_APPROVAL"
+    assert state.human_gate["video_ids"] == ["V001"]
+    assert "video:V01" in state.completed_nodes["V002"]
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert restored.human_gate["video_ids"] == ["V001"]
+
+
+def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
+    tmp_path, monkeypatch
+):
+    runner = load_script("pipeline_runner.py")
+    policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (2160, 3840), color).save(source)
+        runner.accept_generated_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "RUNNING_AUTOMATICALLY", reason="test approval")
+    configure_paid_runner_fixture(runner, batch, item, state)
+    monkeypatch.setattr(
+        runner,
+        "run_autodl_item",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "status": "poll_timeout",
+            "task_id": "known-task",
+        },
+    )
+
+    result = runner.run_local_until_gate(batch, state, policy)
+
+    assert result == {"kind": "VIDEO_POLL_PENDING", "video_ids": ["V001"]}
+    assert state.status == "GENERATING"
+    assert state.pending_action == result
+
+
+@pytest.mark.parametrize("failure_source", ["review", "audit"])
+def test_complete_review_routes_rerunnable_v01_failures_to_rerun_gate(
+    tmp_path, monkeypatch, capsys, failure_source
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+    )
+    offline_video_result(runner, item)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    decision = "failed" if failure_source == "review" else "passed"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": decision,
+                        "reason": "画面异常" if decision == "failed" else "",
+                        "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, item, "视频.mp4")},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit = {
+        "items": [
+            {
+                "item_dir": str(item),
+                "errors": (
+                    [{"artifact_name": "视频.mp4"}]
+                    if failure_source == "audit"
+                    else []
+                ),
+                "missing": [],
+                "demoted": [],
+                "valid": [
+                    {"artifact_name": f"output-{index}"}
+                    for index in range(7 if failure_source == "review" else 6)
+                ],
+            }
+        ]
+    }
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
+            "_audit_result_has_errors": staticmethod(
+                lambda value: any(row.get("errors") for row in value.get("items", []))
+            ),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert output["video_ids"] == ["V001"]
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert restored.human_gate["video_ids"] == ["V001"]
+
+
+@pytest.mark.parametrize("audit_problem", ["missing", "demoted", "valid_absent"])
+def test_complete_review_requires_all_seven_outputs_for_identifiable_v01_item(
+    tmp_path, monkeypatch, capsys, audit_problem
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    state_dir = item / "_工作文件" / "任务状态"
+    state_dir.mkdir(parents=True)
+    (state_dir / "任务信息.json").write_text(
+        json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8"
+    )
+    offline_video_result(runner, item)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": "", "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, item, "视频.mp4")}}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit_item = {
+        "item_dir": str(item),
+        "errors": [],
+        "missing": [],
+        "demoted": [],
+    }
+    if audit_problem != "valid_absent":
+        audit_item[audit_problem] = (
+            ["视频.mp4"]
+            if audit_problem == "missing"
+            else [{"artifact_name": "视频.mp4"}]
+        )
+        audit_item["valid"] = [
+            {"artifact_name": f"output-{index}"} for index in range(6)
+        ]
+    audit = {"items": [audit_item]}
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    if audit_problem == "valid_absent":
+        assert output["kind"] == "BLOCKED"
+        assert "问题范围不明确" in output["reason"]
+        assert restored.status == "BLOCKED"
+    else:
+        assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+        assert output["video_ids"] == ["V001"]
+        assert audit_problem in output["failures"][0]["reason"]
+        assert restored.status == "WAITING_RERUN_APPROVAL"
+
+
+def test_complete_review_blocks_unscoped_seven_output_audit_failure(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    (batch / "V001_甲_待生成").mkdir(parents=True)
+    offline_video_result(runner, batch / "V001_甲_待生成")
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {"items": [{"video_id": "V001", "decision": "passed", "reason": "", "artifacts": {"视频.mp4": load_script("workflow_cli.py")._review_media(batch, batch / "V001_甲_待生成", "视频.mp4")}}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit = {"items": [{"item_dir": "", "missing": ["视频.mp4"]}]}
+    fake_workflow = type(
+        "Workflow",
+        (),
+        {
+            "record_review": staticmethod(lambda *args: None),
+            "audit_batch_outputs": staticmethod(lambda *args, **kwargs: audit),
+            "_review_media": staticmethod(load_script("workflow_cli.py")._review_media),
+        },
+    )
+    monkeypatch.setattr(runner, "_load_workflow_cli", lambda: fake_workflow)
+    monkeypatch.setattr(runner, "_promote_passed_review_outputs", lambda *args: None)
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "BLOCKED"
+    assert "无法定位视频项目" in output["reason"]
+    assert restored.status == "BLOCKED"
+    assert "无法定位视频项目" in restored.blocked_reason
+
+
+def test_runner_happy_path_promotes_seven_outputs_and_completes(
+    tmp_path, monkeypatch, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    workflow = load_script("workflow_cli.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_操作简单_待生成"
+    item.mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    package = {
+        "video_id": "V001",
+        "selling_point": "操作简单",
+        "publish_title": "爸妈也能轻松上手的电动轮椅到底怎么样",
+        "cover_title": "爸妈会操作",
+        "people": [
+            {
+                "id": "P1",
+                "identity": "老人",
+                "gender": "女",
+                "age_feel": "70岁左右",
+                "position": "左侧",
+                "action": "坐在轮椅上",
+                "speaks": True,
+            },
+            {
+                "id": "P2",
+                "identity": "家属",
+                "gender": "女",
+                "age_feel": "40岁左右",
+                "position": "右侧",
+                "action": "自然提问",
+                "speaks": True,
+            },
+        ],
+        "storyboard_people": ["P1", "P2"],
+        "script_segments": [
+            {
+                "start": 0,
+                "end": 4,
+                "speaker_id": "P2",
+                "dialogue": "这个操作会不会很难？",
+            },
+            {
+                "start": 4,
+                "end": 11,
+                "speaker_id": "P1",
+                "dialogue": "操作很顺手，我自己就能开，家里人也省心。",
+            },
+                {
+                    "start": 11,
+                    "end": 15,
+                    "speaker_id": "P2",
+                    "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解。",
+            },
+        ],
+        "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",
+        "last_frame_prompt": "同尺寸合理尾帧，主体继续前进约1至1.5米，产品结构和人物保持一致。",
+        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，轮椅沿直线缓慢前进，不要背景音乐。",
+        "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
+        "hashtags": [
+            "#爱优护电动轮椅",
+            "#ainsnbot高端智能电动轮椅",
+            "#电动轮椅",
+            "#老人专用电动轮椅",
+        ],
+    }
+    (content_dir / "V001.json").write_text(
+        json.dumps(package, ensure_ascii=False), encoding="utf-8"
+    )
+    profile = SKILL_ROOT / "profiles" / "爱优护电动轮椅_淘宝天猫光合.json"
+
+    product = tmp_path / "产品参考.png"
+    Image.new("RGB", (64, 64), "navy").save(product)
+    (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "768P", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}, "product_images": [str(product)]}), encoding="utf-8")
+    assert runner.main(
+        [
+            "approve-start",
+            "--batch",
+            str(batch),
+            "--approved-budget",
+            "10.00",
+            "--estimated-v01-total",
+            "3.00",
+            "--image-provider",
+            "gpt_web",
+        ]
+    ) == 0
+    content_action = json.loads(capsys.readouterr().out)
+    assert runner.main(
+        [
+            "accept-content",
+            "--batch",
+            str(batch),
+            "--content-dir",
+            str(content_dir),
+            "--action-id",
+            content_action["action_id"],
+            "--profile",
+            str(profile),
+        ]
+    ) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True, accepted
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (2160, 3840), color).save(source)
+        assert runner.main(["next", "--batch", str(batch)]) == 0
+        action = json.loads(capsys.readouterr().out)
+        assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED", action
+        assert runner.main(
+            [
+                "accept-image",
+                "--batch",
+                str(batch),
+                "--video-id",
+                "V001",
+                "--artifact",
+                artifact,
+                "--source",
+                str(source),
+                "--action-id",
+                action["action_id"],
+            ]
+        ) == 0
+        capsys.readouterr()
+
+    candidate = item / "_工作文件" / "生成过程" / "视频候选.mp4"
+
+    def fake_video_run(*args, **kwargs):
+        return offline_video_result(runner, item)
+
+    monkeypatch.setattr(runner, "run_autodl_item", fake_video_run)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "USER_FINAL_REVIEW_REQUIRED"
+
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "passed",
+                        "reason": "",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                                "version": "V01",
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"kind": "DONE"}
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.status == "COMPLETED"
+    audit = workflow.audit_batch_outputs(batch, dry_run=True)
+    assert len(audit["items"][0]["valid"]) == 7
+    assert audit["items"][0]["missing"] == []
+    assert audit["items"][0]["demoted"] == []
+    assert audit["items"][0]["errors"] == []
+    assert (item / "标题.txt").is_file()
+    assert (item / "发布正文.txt").is_file()
+    assert (item / "话题标签.txt").is_file()
+    assert (item / f"{package['publish_title']}.mp4").is_file()
+    assert runner._task_info(item)["status"] == "COMPLETED"
+    assert json.loads((batch / "批次任务表.json").read_text(encoding="utf-8"))["items"][0]["status"] == "COMPLETED"
+
+
+def test_non_video_promotion_failure_blocks_without_offering_paid_rerun(
+    tmp_path, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    candidate = process / "视频候选.mp4"
+    candidate.write_bytes(b"validated-video-candidate")
+    offline_video_result(runner, item)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "passed",
+                        "reason": "",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "BLOCKED"
+    assert "非视频产出晋升失败" in output["reason"]
+    assert output["kind"] != "USER_RERUN_APPROVAL_REQUIRED"
+    assert restored.status == "BLOCKED"
+
+
+def test_non_video_audit_failure_is_technical_block_not_paid_video_rerun(tmp_path):
+    runner = load_script("pipeline_runner.py")
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
+    audit = {
+        "items": [
+            {
+                "item_dir": str(item),
+                "errors": [],
+                "missing": ["发布正文.txt"],
+                "demoted": [],
+                "valid": [
+                    {"artifact_name": name}
+                    for name in (
+                        "视频.mp4",
+                        "封面图.png",
+                        "话题标签.txt",
+                        "标题.txt",
+                        "分镜图.png",
+                        "尾帧图.png",
+                    )
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="非视频产出审计失败"):
+        runner._failed_audit_items(batch, audit)
+
+
+def test_failed_video_review_promotes_content_before_requesting_v02(
+    tmp_path, capsys
+):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    process = item / "_工作文件" / "生成过程"
+    process.mkdir(parents=True)
+    (process / "标题.txt").write_text(
+        "发布标题：爸妈轻松出行的电动轮椅\n封面标题：轻松操作\n",
+        encoding="utf-8",
+    )
+    (process / "发布正文.txt").write_text("正文内容\n", encoding="utf-8")
+    (process / "话题标签.txt").write_text("#电动轮椅\n", encoding="utf-8")
+    candidate = process / "视频候选.mp4"
+    candidate.write_bytes(b"rejected-video-candidate")
+    offline_video_result(runner, item)
+    for artifact, color in (
+        ("分镜图.png", "blue"),
+        ("尾帧图.png", "green"),
+        ("封面图.png", "orange"),
+    ):
+        source = tmp_path / artifact
+        Image.new("RGB", (2160, 3840), color).save(source)
+        runner.accept_generated_image(item, artifact, source)
+    state = runner.load_or_create_state(batch, policy)
+    runner.transition(state, "WAITING_FINAL_REVIEW", reason="candidate ready")
+    runner.save_state(batch, state)
+    result_path = tmp_path / "review.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "video_id": "V001",
+                        "decision": "failed",
+                        "reason": "画面异常",
+                        "artifacts": {
+                            "视频.mp4": {
+                                "source_path": candidate.relative_to(item).as_posix(),
+                                "sha256": runner._sha256(candidate),
+                            }
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    return_code = runner.main(
+        [
+            "complete-review",
+            "--batch",
+            str(batch),
+            "--result",
+            str(result_path),
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    restored = runner.load_or_create_state(batch, policy)
+    assert return_code == 0
+    assert output["kind"] == "USER_RERUN_APPROVAL_REQUIRED"
+    assert output["video_ids"] == ["V001"]
+    assert restored.status == "WAITING_RERUN_APPROVAL"
+    assert (item / "标题.txt").is_file()
+    assert (item / "发布正文.txt").is_file()
+    assert (item / "话题标签.txt").is_file()
+
+
+def test_model_call_counters_survive_validation_failures(tmp_path, monkeypatch, capsys):
+    runner = load_script("pipeline_runner.py")
+    policy_module = load_script("pipeline_policy.py")
+    policy = policy_module.load_policy(SKILL_ROOT)
+    batch = tmp_path / "batch"
+    item = batch / "V001_甲_待生成"
+    item.mkdir(parents=True)
+    content_dir = tmp_path / "content"
+    content_dir.mkdir()
+    state = runner.load_or_create_state(batch, policy)
+    state.status = "RUNNING_AUTOMATICALLY"
+    seal_gpt_web_manifest(runner, batch, state, policy)
+    runner._reserve_action(batch, state, policy, {"kind": "BATCH_CONTENT_REQUIRED", "video_ids": ["V001"], "output_dir": str(content_dir)}, "content_create")
+
+    return_code = runner.main(
+        [
+            "accept-content",
+            "--batch",
+            str(batch),
+            "--content-dir",
+            str(content_dir),
+            "--profile",
+            str(tmp_path / "missing-profile.json"),
+        ]
+    )
+    assert return_code == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.model_calls_batch == 1
+
+    source = tmp_path / "invalid-square.png"
+    Image.new("RGB", (64, 64), "black").save(source)
+    runner._reserve_action(batch, restored, policy, {"kind": "GPT_WEB_IMAGE_REQUIRED", "provider": "gpt_web", "video_id": "V001", "artifact": "分镜图.png"}, "gpt_web_image")
+    return_code = runner.main(
+        [
+            "accept-image",
+            "--batch",
+            str(batch),
+            "--video-id",
+            "V001",
+            "--artifact",
+            "分镜图.png",
+            "--source",
+            str(source),
+        ]
+    )
+    assert return_code == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "IMAGE_FAILURE_RECORDED"
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.model_calls_by_video == {}
+    assert restored.image_calls_by_video["V001"] == 1
+
+
+def test_autodl_task_status_is_public_and_tolerates_nested_data():
+    client = load_script("autodl_h3.py")
+
+    assert client.task_status({"data": {"status": "COMPLETED"}}) == "completed"
