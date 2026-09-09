@@ -793,7 +793,7 @@ def normalize_web_image(
     source = Path(source).resolve()
     output = Path(output).resolve()
     if not source.is_file() or source.stat().st_size == 0:
-        raise ValueError("GPT 网页图片不存在或为空")
+        raise ValueError("生成图片结果不存在或为空")
     if width <= 0 or height <= 0:
         raise ValueError("图片目标尺寸必须为正数")
     try:
@@ -801,7 +801,7 @@ def normalize_web_image(
             image.load()
             source_size = image.size
             if image.width * 16 != image.height * 9:
-                raise ValueError("GPT 网页图片必须为 9:16，禁止自动裁切或拉伸")
+                raise ValueError("生成图片结果必须为 9:16，禁止自动裁切或拉伸")
             normalized = image.convert("RGB").resize(
                 (width, height), Image.Resampling.LANCZOS
             )
@@ -812,7 +812,7 @@ def normalize_web_image(
     except ValueError:
         raise
     except Exception as exc:
-        raise ValueError("GPT 网页图片无法在本地解码") from exc
+        raise ValueError("生成图片结果无法在本地解码") from exc
     return {
         "source_size": list(source_size),
         "source_sha256": _sha256(source),
@@ -836,7 +836,7 @@ def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> 
     candidate = item_dir / "_工作文件" / "生成过程" / candidate_name
     source = Path(source).resolve()
     if not source.is_file():
-        raise ValueError("GPT 网页图片不存在")
+        raise ValueError("生成图片结果不存在")
     raw = candidate.parent / (candidate.stem + "_原始_" + _sha256(source)[:16] + source.suffix)
     if raw.resolve() != source:
         raw.parent.mkdir(parents=True, exist_ok=True)
@@ -860,7 +860,7 @@ def accept_generated_image(item_dir: Path, artifact_name: str, source: Path) -> 
         candidate,
         "passed",
         "batch-auto-authorization",
-        "GPT 网页结果按图片免审规则完成本地技术检查并自动晋升",
+        "生成图片结果按图片免审规则完成本地技术检查并自动晋升",
     )
     promoted = workflow.promote_approved_artifact(item_dir, event)
     return {
@@ -1261,9 +1261,9 @@ def next_action(
             missing_content.append(video_id)
             continue
         for artifact, prompt_name, raw_name in (
-            ("分镜图.png", "分镜提示词.txt", "GPT网页原始分镜.png"),
-            ("尾帧图.png", "合理尾帧提示词.txt", "GPT网页原始尾帧.png"),
-            ("封面图.png", "封面提示词.txt", "GPT网页原始封面.png"),
+            ("分镜图.png", "分镜提示词.txt", "生图原始分镜.png"),
+            ("尾帧图.png", "合理尾帧提示词.txt", "生图原始尾帧.png"),
+            ("封面图.png", "封面提示词.txt", "生图原始封面.png"),
         ):
             if workflow.validated_promoted_artifact_path(item, artifact) is None:
                 if not (process / prompt_name).is_file():

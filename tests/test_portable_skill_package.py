@@ -2113,7 +2113,7 @@ def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, 
         "video_id": "V001",
         "artifact": "分镜图.png",
         "prompt_path": str((process / "分镜提示词.txt").resolve()),
-        "output_path": str((process / "GPT网页原始分镜.png").resolve()),
+        "output_path": str((process / "生图原始分镜.png").resolve()),
     }
     assert action["provider"] == provider
     if provider == "third_party_api":

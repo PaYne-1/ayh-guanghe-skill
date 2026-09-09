@@ -319,6 +319,46 @@ def test_each_approved_provider_promotes_images_through_the_shared_accept_path(
     assert (item / "分镜图.png").is_file()
 
 
+@pytest.mark.parametrize("provider", ["gpt_web", "third_party_api"])
+def test_provider_image_acceptance_uses_neutral_validation_audit_and_raw_evidence(
+    setup_batch, capsys, provider, api_config_path, monkeypatch
+):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "provider-selection-test-secret")
+    action = approve_and_select_image(
+        setup_batch, capsys, provider,
+        api_config_path if provider == "third_party_api" else None,
+    )
+    assert Path(action["output_path"]).name == "生图原始分镜.png"
+    Image.new("RGB", (90, 160), "green").save(action["output_path"])
+    runner, _, batch, item = setup_batch
+    assert runner.main([
+        "accept-image", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--source", action["output_path"],
+        "--action-id", action["action_id"],
+    ]) == 0
+    capsys.readouterr()
+    audit = (item / "_工作文件" / "验收记录" / "产出验收记录.json").read_text(
+        encoding="utf-8"
+    )
+    assert "生成图片结果按图片免审规则完成本地技术检查并自动晋升" in audit
+    assert "GPT 网页结果" not in audit
+
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    failure_action = json.loads(capsys.readouterr().out)
+    Image.new("RGB", (64, 64), "black").save(failure_action["output_path"])
+    assert runner.main([
+        "accept-image", "--batch", str(batch),
+        "--video-id", failure_action["video_id"],
+        "--artifact", failure_action["artifact"],
+        "--source", failure_action["output_path"],
+        "--action-id", failure_action["action_id"],
+    ]) == 0
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["kind"] == "IMAGE_FAILURE_RECORDED"
+    assert "生成图片结果必须为 9:16" in failure["reason"]
+    assert "GPT 网页" not in failure["reason"]
+
+
 def _approved_image_state(setup_batch, provider, api_config_path=None):
     runner, policy, batch, item = setup_batch
     confirmation_path = batch / "启动确认单.json"
