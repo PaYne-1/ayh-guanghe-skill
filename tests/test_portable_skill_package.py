@@ -58,8 +58,10 @@ def configure_paid_runner_fixture(runner, batch, item, state):
     runner.prepare_payload(batch, item, state)
 
 
-def seal_gpt_web_manifest(runner, batch, state, policy):
-    """Give legacy offline fixtures the explicit current provider contract."""
+def seal_image_provider_manifest(
+    runner, batch, state, policy, provider="gpt_web", image_api_config=None
+):
+    """Give offline fixtures the explicit current provider contract."""
     confirmation_path = batch / "启动确认单.json"
     confirmation = (
         json.loads(confirmation_path.read_text(encoding="utf-8"))
@@ -72,8 +74,8 @@ def seal_gpt_web_manifest(runner, batch, state, policy):
         "duration_seconds": 15,
         "max_budget_yuan": confirmation.get("max_budget_yuan", "10"),
         "unit_price_yuan": confirmation.get("unit_price_yuan", "3"),
-        "image_provider": "gpt_web",
-        "image_api_config": {},
+        "image_provider": provider,
+        "image_api_config": image_api_config or {},
     })
     batch.mkdir(parents=True, exist_ok=True)
     confirmation_path.write_text(json.dumps(confirmation), encoding="utf-8")
@@ -85,6 +87,10 @@ def seal_gpt_web_manifest(runner, batch, state, policy):
         state.approved_manifest
     )
     return state
+
+
+def seal_gpt_web_manifest(runner, batch, state, policy):
+    return seal_image_provider_manifest(runner, batch, state, policy)
 
 
 def offline_video_result(runner, item, task_id="offline-task"):
@@ -208,6 +214,36 @@ def test_image_generation_routing_requires_a_locked_provider_and_is_review_free(
         "batch_budget_yuan",
     ):
         assert field in combined
+
+
+def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details():
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routing = (SKILL_ROOT / "references" / "image-generation-routing.md").read_text(
+        encoding="utf-8"
+    )
+    workflow = (SKILL_ROOT / "references" / "workflow.md").read_text(
+        encoding="utf-8"
+    )
+    delivery = (SKILL_ROOT / "references" / "delivery-contract.md").read_text(
+        encoding="utf-8"
+    )
+    combined = "\n".join((skill, routing, workflow, delivery))
+
+    for stale_sole_channel_claim in (
+        "文本模型负责内容，GPT 网页负责生图",
+        "GPT 网页图片单独计数",
+        "GPT 一次生成包含准确标题的完整封面",
+        "GPT 一次生成画面、版式和准确标题",
+        "并要求 GPT 在一次生成中完成画面、版式和标题",
+        "GPT 原图为 `1152×2048`",
+    ):
+        assert stale_sole_channel_claim not in combined
+
+    for document in (skill, routing, workflow, delivery):
+        assert "已锁定生图渠道" in document
+    assert "gpt_web_image" in skill
+    assert "image_budget_ledger" in skill
+    assert "GPT 网页端" in routing and "THIRD_PARTY_IMAGE_REQUIRED" in routing
 
 
 def test_skill_runtime_entry_is_compact_and_runner_driven():
@@ -2036,7 +2072,14 @@ def test_model_budget_blocks_only_model_dependent_work():
         runner.consume_model_call(state, policy, video_id="V001")
 
 
-def test_next_image_action_is_compact_and_web_only(tmp_path):
+@pytest.mark.parametrize(
+    ("provider", "kind"),
+    [
+        ("gpt_web", "GPT_WEB_IMAGE_REQUIRED"),
+        ("third_party_api", "THIRD_PARTY_IMAGE_REQUIRED"),
+    ],
+)
+def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, kind):
     runner = load_script("pipeline_runner.py")
     policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
     batch = tmp_path / "batch"
@@ -2047,17 +2090,36 @@ def test_next_image_action_is_compact_and_web_only(tmp_path):
     (process / "策划内容.json").write_text("{}", encoding="utf-8")
     state = runner.RunnerState.new("digest")
     state.status = "RUNNING_AUTOMATICALLY"
-    seal_gpt_web_manifest(runner, batch, state, policy)
+    image_api_config = (
+        {
+            "api_name": "Offline test images",
+            "base_url": "https://images.example.test/v1",
+            "model": "offline-image-v1",
+            "api_key_env": "OFFLINE_TEST_IMAGE_API_KEY",
+            "unit_price_yuan": "0.20",
+            "batch_budget_yuan": "1.00",
+        }
+        if provider == "third_party_api"
+        else None
+    )
+    seal_image_provider_manifest(
+        runner, batch, state, policy, provider, image_api_config
+    )
 
     action = runner.next_action(batch, state, policy)
 
     assert {k: action[k] for k in ("kind", "video_id", "artifact", "prompt_path", "output_path")} == {
-        "kind": "GPT_WEB_IMAGE_REQUIRED",
+        "kind": kind,
         "video_id": "V001",
         "artifact": "分镜图.png",
         "prompt_path": str((process / "分镜提示词.txt").resolve()),
         "output_path": str((process / "GPT网页原始分镜.png").resolve()),
     }
+    assert action["provider"] == provider
+    if provider == "third_party_api":
+        assert action["api_config"] == image_api_config
+    else:
+        assert "api_config" not in action
     assert "prompt" not in action
 
 

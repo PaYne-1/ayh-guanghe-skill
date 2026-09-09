@@ -7,7 +7,7 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 ## Overview
 
-把“产品图片 + 卖点”转成可验收的 15 秒竖屏视频项目。Codex、WorkBuddy、Hermes 或其他能读取 Agent Skills 的智能体均使用同一套文件协议；文本模型负责内容，GPT 网页负责生图，便携脚本负责目录、校验、AutoDL 任务记录与验收。
+把“产品图片 + 卖点”转成可验收的 15 秒竖屏视频项目。Codex、WorkBuddy、Hermes 或其他能读取 Agent Skills 的智能体均使用同一套文件协议；文本模型负责内容，已锁定生图渠道负责生图，便携脚本负责目录、校验、AutoDL 任务记录与验收。
 
 ## Trigger contract
 
@@ -19,7 +19,7 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 1. **安全接入 API**：首次启动清单不询问 AutoDL API 接入状态或鉴权方式。用户授权验证后直接读取安全环境配置；`AUTODL_AUTH_SCHEME` 未设置时沿用脚本默认值 `bearer`。只有缺少 `AUTODL_API_KEY`，或鉴权实际失败并导致流程无法继续时，才询问并引导用户安全配置；不得要求用户把完整密钥粘贴到聊天中。
 2. 用户回复启动清单后，完成实时价格与 V01 总预算确认；dry-run 不联网、不扣费，API 可用或 dry-run 通过都不代表付费授权。
 3. 启动时按需读取 [11 节点流程](references/workflow.md)、[内容契约](references/content-contract.md)、[自动复盘与规避规则](references/automatic-learning-rules.md) 及产品配置；详细引用是人工审计文档，运行时不在每个节点反复整篇读入模型上下文。
-4. **生图渠道必须在启动时二选一并在批次内锁定**：`GPT 网页端` 使用当前已登录浏览器会话；`第三方 API` 使用已确认的非密钥配置和独立图片 API 批次预算。禁止自动切换或在失败后回退到另一渠道；`gpt_web` 选择时禁止使用服务器端 OpenAI API。运行器会返回 `GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，两者均用 `accept-image` 提交下载的本地文件。不进行人工图片审核，也不进行模型视觉审核；本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
+4. **生图渠道必须在启动时二选一并在批次内锁定**：`GPT 网页端` 使用当前已登录浏览器会话；`第三方 API` 使用已确认的非密钥配置和独立图片 API 批次预算。批准后的已锁定生图渠道禁止自动切换或在失败后回退到另一渠道；`gpt_web` 选择时禁止使用服务器端 OpenAI API。运行器会返回 `GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，两者均用 `accept-image` 提交下载的本地文件。不进行人工图片审核，也不进行模型视觉审核；本地免费技术检查通过后脚本自动晋升，见 [生图路由](references/image-generation-routing.md)。
 5. DeepSeek 只用于批次内容创作和异常修复，必须由 `pipeline_policy.json` 的批次/单视频调用计数器限制。生图接收、技术检查、哈希、轮询、下载、晋升、审计和恢复不调用 DeepSeek。
 6. 视频 V01 只能在已批准总预算内提交；失败后 V02 必须取得该视频的单独费用授权，不得提交 V03。最终视频始终由用户人工验收，见 [AutoDL H3](references/autodl-h3.md)、[验收与学习](references/review-learning.md) 和 [交付契约](references/delivery-contract.md)。
 
@@ -50,7 +50,7 @@ python scripts/workflow_cli.py init `
 6. 动作完成后再次调用 `next`。`USER_FINAL_REVIEW_REQUIRED` 打开 `report_path`，只验收报告中已有真实候选的项目，再调用 `complete-review`；通过/不通过都绑定报告路径、哈希和版本。未完成的兄弟项目保持可恢复。`USER_RERUN_APPROVAL_REQUIRED` 只为已有真实 V01 提交且获批的项目调用 `approve-rerun`；金额必须等于该项预计费用。`LOCAL_OUTPUT_REPAIR_REQUIRED` 按 `audit_path` 恢复缺失/损坏的已批准产出，再运行 `run-local`，此分支只审计、不生成、不付费。`ITEM_BLOCKED` 时其他项目继续，`BLOCKED` 或 `ITEMS_BLOCKED` 展示已落盘的原因，`DONE` 才算完成。
 7. 不得把完整日志粘贴回模型上下文；只读取脚本输出的紧凑 JSON。
 
-默认分别限制批次内容创建 1 次、内容校验修正 1 次、必要异常诊断 1 次；GPT 网页图片单独计数。必要诊断先运行 `reserve-diagnostic --batch "批次目录" --video-id "视频ID" --reason "简短原因"`，按返回动作完成后用 `accept-diagnostic --action-id "动作ID" --result "诊断JSON"` 接收。诊断只记录建议，不扩大付费或重生图授权。
+默认分别限制批次内容创建 1 次、内容校验修正 1 次、必要异常诊断 1 次。`GPT_WEB_IMAGE_REQUIRED` 仅按 `gpt_web_image` 动作类别计数，不占用第三方图片 API 预算；`THIRD_PARTY_IMAGE_REQUIRED` 的预留、结算和余额只写入独立 `image_budget_ledger`，并受启动时确认的图片 API 批次预算限制，不与文本模型或 AutoDL 视频费用混合。必要诊断先运行 `reserve-diagnostic --batch "批次目录" --video-id "视频ID" --reason "简短原因"`，按返回动作完成后用 `accept-diagnostic --action-id "动作ID" --result "诊断JSON"` 接收。诊断只记录建议，不扩大付费或重生图授权。
 
 ## Execution contract
 
@@ -73,7 +73,7 @@ python scripts/workflow_cli.py init `
 | 任务 | 命令/规则 |
 |---|---|
 | 内容落盘 | `workflow_cli.py validate-content` |
-| 封面文字 | GPT 一次生成包含准确标题的完整封面；禁止代码叠字，生成结果不做二次文字审核 |
+| 封面文字 | 已锁定生图渠道一次生成包含准确标题的完整封面；禁止代码叠字，生成结果不做二次文字审核 |
 | 明确验收产出 | `workflow_cli.py review-output`，`passed` 后才晋升一级目录 |
 | 审计一级产出 | `workflow_cli.py audit-outputs`，撤下无有效通过证据的文件 |
 | 付费前检查 | `autodl_h3.py submit --dry-run` |
@@ -88,7 +88,7 @@ python scripts/workflow_cli.py init `
 |---|---|---|
 | 启动阶段重复询问 Key 或鉴权 | 回复后直接检查安全环境，鉴权缺省 `bearer`；只有 Key 缺失或真实鉴权失败才询问 | 配置检查或明确阻断证据 |
 | 自动模式每个节点都停下来确认 | 启动和付费授权后连续完成六项前置产出，只在最终视频、失败重跑或硬阻断处暂停 | 前置产出验收事件绑定本批次自动授权 |
-| 先做无字底图再用代码叠字 | GPT 一次生成画面、版式和准确标题，下载后做本地技术检查 | 完整封面原图、提示词与候选 SHA-256 |
+| 先做无字底图再用代码叠字 | 已锁定生图渠道一次生成画面、版式和准确标题，下载后做本地技术检查 | 完整封面原图、提示词与候选 SHA-256 |
 | 自动验收失败后直接付费重跑 | 先展示候选和失败证据，再询问是否重跑 | 用户对该次重跑的明确授权 |
 | 用户认定合格但视频未进入一级目录 | 对指定候选追加 `passed`，保留旧 `failed`，立即晋升标题化文件 | 最新通过事件与一级文件 SHA-256 一致 |
 | `标题.txt` 含发布标题和封面标题 | 文件名只解析 `发布标题：` 行 | 一级 `.mp4` 不含封面标题 |
