@@ -2260,7 +2260,61 @@ def _main_locked(args) -> int:
 def _archive_v01_for_rerun(item: Path) -> None:
     archive = item / "_工作文件/历史版本/视频版本/V01_初次生成"
     archive.mkdir(parents=True, exist_ok=True)
-    for category, filename in (("生成过程", "视频候选.mp4"), ("生成过程", "视频提交提示词.txt"), ("任务状态", "提交请求.json"), ("验收记录", "视频技术检查.json"), ("验收记录", "自动验收报告.md"), ("任务状态", "AutoDL提交结果.json"), ("任务状态", "提交预览.json"), ("任务状态", "查询结果.json")):
+    request = item / "_工作文件/任务状态/提交请求.json"
+    prompt = item / "_工作文件/生成过程/视频提交提示词.txt"
+    archived_request = archive / request.name
+    archived_prompt = archive / prompt.name
+
+    def validate_pair(request_path: Path, prompt_path: Path, label: str) -> None:
+        if request_path.is_file() != prompt_path.is_file():
+            raise ValueError(f"{label}提交请求与视频提示词必须成对存在")
+        if not request_path.is_file():
+            raise ValueError(f"{label}缺少提交请求与视频提示词")
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("prompt") != prompt_path.read_text(encoding="utf-8"):
+            raise ValueError(f"{label}提交请求与视频提示词内容不一致")
+
+    validate_pair(request, prompt, "V01")
+    existing_pair = (archived_request.exists(), archived_prompt.exists())
+    if any(existing_pair) and not all(existing_pair):
+        raise ValueError("V01 历史提交请求与视频提示词必须成对归档")
+    if all(existing_pair):
+        validate_pair(archived_request, archived_prompt, "V01 历史")
+        if (
+            _sha256(archived_request) != _sha256(request)
+            or _sha256(archived_prompt) != _sha256(prompt)
+        ):
+            raise ValueError("V01 历史提交请求/视频提示词与当前版本不同")
+    else:
+        staged: list[tuple[Path, Path]] = []
+        created: list[Path] = []
+        try:
+            for source, target in ((request, archived_request), (prompt, archived_prompt)):
+                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                staged.append((temporary, target))
+                shutil.copy2(source, temporary)
+                if _sha256(temporary) != _sha256(source):
+                    raise OSError(f"V01 归档临时副本哈希不一致：{source.name}")
+            for temporary, target in staged:
+                temporary.replace(target)
+                created.append(target)
+        except Exception:
+            for temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+            for target in created:
+                target.unlink(missing_ok=True)
+            raise
+
+    try:
+        request.unlink()
+        prompt.unlink()
+    except Exception:
+        for source, target in ((request, archived_request), (prompt, archived_prompt)):
+            if not source.exists() and target.exists():
+                shutil.copy2(target, source)
+        raise
+
+    for category, filename in (("生成过程", "视频候选.mp4"), ("验收记录", "视频技术检查.json"), ("验收记录", "自动验收报告.md"), ("任务状态", "AutoDL提交结果.json"), ("任务状态", "提交预览.json"), ("任务状态", "查询结果.json")):
         source = item / "_工作文件" / category / filename
         if source.is_file():
             target = archive / filename

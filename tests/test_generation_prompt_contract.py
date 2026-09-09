@@ -53,6 +53,8 @@ def test_specific_product_appearance_is_rejected(contract, appearance):
     [
         "老人手放控制器上，自然向家属说明操作。",
         "始终保持扶手结构一致，不要改变靠背。",
+        "老人穿红色衣服，手放控制器。",
+        "按控制器增加速度，老人自然前进。",
     ],
 )
 def test_component_action_or_reference_lock_is_not_product_appearance_description(
@@ -237,6 +239,15 @@ def test_video_contract_allows_component_action_and_reference_lock(
     contract, people, segments, scene
 ):
     assert contract.compile_video_prompt(scene, people, segments).startswith(scene)
+
+
+@pytest.mark.parametrize(
+    "appearance",
+    ["塑料扶手", "增大踏板"],
+)
+def test_component_bound_appearance_or_redesign_is_rejected(contract, appearance):
+    with pytest.raises(ValueError, match="产品外观"):
+        contract.compile_image_prompt(f"自然出行，{appearance}清晰可见。", "分镜图.png")
 
 
 def test_video_contract_requires_two_distinct_people_and_ordered_non_overlapping_segments(

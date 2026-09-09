@@ -207,6 +207,53 @@ def test_v01_archive_moves_submission_prompt_with_submission_request(tmp_path):
     assert (archive / "视频提交提示词.txt").read_text(encoding="utf-8") == "V01 提交提示词"
 
 
+def test_v01_archive_rejects_unpaired_archive_conflict_without_moving_sources(tmp_path):
+    runner = module()
+    item = tmp_path / "V001_操作简单_待生成"
+    request = item / "_工作文件/任务状态/提交请求.json"
+    prompt = item / "_工作文件/生成过程/视频提交提示词.txt"
+    write(request, {"prompt": "V01 提交提示词"})
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("V01 提交提示词", encoding="utf-8")
+    archive = item / "_工作文件/历史版本/视频版本/V01_初次生成"
+    write(archive / "提交请求.json", {"prompt": "冲突版本"})
+
+    with pytest.raises(ValueError, match="成对"):
+        runner._archive_v01_for_rerun(item)
+
+    assert request.is_file()
+    assert prompt.is_file()
+    assert not (archive / "视频提交提示词.txt").exists()
+
+
+def test_v01_archive_rolls_back_pair_when_staged_copy_fails(tmp_path, monkeypatch):
+    runner = module()
+    item = tmp_path / "V001_操作简单_待生成"
+    request = item / "_工作文件/任务状态/提交请求.json"
+    prompt = item / "_工作文件/生成过程/视频提交提示词.txt"
+    write(request, {"prompt": "V01 提交提示词"})
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("V01 提交提示词", encoding="utf-8")
+    real_copy = runner.shutil.copy2
+
+    def fail_prompt_copy(source, target, *args, **kwargs):
+        if Path(source) == prompt:
+            Path(target).write_bytes(b"partial copy")
+            raise OSError("simulated prompt copy failure")
+        return real_copy(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(runner.shutil, "copy2", fail_prompt_copy)
+    with pytest.raises(OSError, match="simulated"):
+        runner._archive_v01_for_rerun(item)
+
+    archive = item / "_工作文件/历史版本/视频版本/V01_初次生成"
+    assert request.is_file()
+    assert prompt.is_file()
+    assert not (archive / "提交请求.json").exists()
+    assert not (archive / "视频提交提示词.txt").exists()
+    assert not list(archive.glob("*.tmp"))
+
+
 @pytest.mark.parametrize("field", ["storyboard_prompt", "last_frame_prompt", "video_prompt"])
 def test_content_validation_rejects_product_appearance_description(field):
     workflow = module("workflow_cli")
@@ -227,6 +274,8 @@ def test_content_validation_rejects_product_appearance_description(field):
         ("storyboard_prompt", "老人手放控制器上，保持扶手结构一致。"),
         ("last_frame_prompt", "不要改变靠背，产品整体自然前进。"),
         ("video_prompt", "一镜到底，连续平稳运镜，完整双人对话口播，手放控制器上，不要背景音乐。"),
+        ("storyboard_prompt", "老人穿红色衣服，手放控制器。"),
+        ("video_prompt", "一镜到底，连续平稳运镜，完整双人对话口播，按控制器增加速度，不要背景音乐。"),
     ],
 )
 def test_content_validation_allows_component_action_and_reference_lock(field, prose):

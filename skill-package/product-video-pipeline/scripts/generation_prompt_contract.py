@@ -46,12 +46,19 @@ APPEARANCE_DESCRIPTION_TERMS = (
     "加宽",
     "加长",
     "加厚",
+    "增大",
     "真皮",
     "皮质",
     "金属",
     "塑料",
     "铝合金",
     "碳纤维",
+    "改成",
+    "变成",
+    "换成",
+)
+
+PRODUCT_REDESIGN_TERMS = (
     "加装",
     "新增",
     "增加",
@@ -62,9 +69,28 @@ APPEARANCE_DESCRIPTION_TERMS = (
     "改造",
     "重新设计",
     "补画",
-    "改成",
-    "变成",
-    "换成",
+)
+
+_COMPONENT_PATTERN = "(?:" + "|".join(
+    re.escape(term) for term in FORBIDDEN_PRODUCT_APPEARANCE_TERMS
+) + ")"
+_APPEARANCE_PATTERN = "(?:" + "|".join(
+    re.escape(term) for term in APPEARANCE_DESCRIPTION_TERMS
+) + ")"
+_REDESIGN_PATTERN = "(?:" + "|".join(
+    re.escape(term) for term in PRODUCT_REDESIGN_TERMS
+) + ")"
+_COMPONENT_SUFFIX_REDESIGN_PATTERN = "(?:" + "|".join(
+    re.escape(term) for term in PRODUCT_REDESIGN_TERMS if term != "增加"
+) + ")"
+_COMPONENT_PREFIX_MODIFIER = re.compile(
+    rf"(?:{_APPEARANCE_PATTERN}|{_REDESIGN_PATTERN})\s*(?:的)?\s*{_COMPONENT_PATTERN}"
+)
+_COMPONENT_SUFFIX_APPEARANCE = re.compile(
+    rf"{_COMPONENT_PATTERN}\s*(?:的)?\s*{_APPEARANCE_PATTERN}"
+)
+_COMPONENT_SUFFIX_REDESIGN = re.compile(
+    rf"{_COMPONENT_PATTERN}\s*(?:进行|被)?\s*{_COMPONENT_SUFFIX_REDESIGN_PATTERN}"
 )
 
 PRODUCT_REFERENCE_BLOCK = """【产品参考锁定】
@@ -101,13 +127,11 @@ def has_forbidden_product_appearance(text: object) -> bool:
     """Reject concrete component appearance or redesign prose, not actions."""
     if not isinstance(text, str):
         return False
-    clauses = re.split(r"[。！？；\n]", text)
-    for clause in clauses:
-        if not any(component in clause for component in FORBIDDEN_PRODUCT_APPEARANCE_TERMS):
-            continue
-        if any(term in clause for term in APPEARANCE_DESCRIPTION_TERMS):
-            return True
-    return False
+    return bool(
+        _COMPONENT_PREFIX_MODIFIER.search(text)
+        or _COMPONENT_SUFFIX_APPEARANCE.search(text)
+        or _COMPONENT_SUFFIX_REDESIGN.search(text)
+    )
 
 
 def _without_contract_blocks(scene: str, blocks: Sequence[str]) -> str:
