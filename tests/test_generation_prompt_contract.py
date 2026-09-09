@@ -123,7 +123,44 @@ def test_video_prompt_locks_single_shot_and_dialogue_contract(contract, people, 
         assert rule in prompt
     for segment in segments:
         assert prompt.count(segment["dialogue"]) == 1
+    assert "P1（老人）" in prompt
+    assert "P2（家属）" in prompt
     assert contract.validate_video_request(prompt, segments) == []
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [(-1, 5), (0, 16), (15, 16), (5, 5)],
+)
+def test_video_contract_rejects_segments_outside_the_15_second_window(
+    contract, people, segments, start, end
+):
+    invalid = [dict(segment) for segment in segments]
+    invalid[0]["start"] = start
+    invalid[0]["end"] = end
+
+    with pytest.raises(ValueError, match="0–15"):
+        contract.compile_video_prompt("公园内自然同行", people, invalid)
+
+
+def test_video_contract_rejects_duplicate_dialogue_during_compilation(
+    contract, people, segments
+):
+    invalid = [dict(segment) for segment in segments]
+    invalid[1]["dialogue"] = invalid[0]["dialogue"]
+
+    with pytest.raises(ValueError, match="台词"):
+        contract.compile_video_prompt("公园内自然同行", people, invalid)
+
+
+def test_video_recompile_does_not_duplicate_product_reference_lock(
+    contract, people, segments
+):
+    base = "公园内自然同行\n" + contract.PRODUCT_REFERENCE_BLOCK
+
+    prompt = contract.compile_video_prompt(base, people, segments)
+
+    assert prompt.count(contract.PRODUCT_REFERENCE_BLOCK) == 1
 
 
 def test_video_validator_rejects_missing_closed_dialogue_rule(contract, people, segments):
@@ -140,6 +177,15 @@ def test_video_validator_rejects_missing_non_speaker_silence_rule(contract, peop
     mutated = prompt.replace("非当前说话者嘴巴闭合且完全不发声。", "")
 
     assert "video.non_speaker_silence_missing" in contract.validate_video_request(
+        mutated, segments
+    )
+
+
+def test_video_validator_rejects_missing_speaker_identity_mapping(contract, people, segments):
+    prompt = contract.compile_video_prompt("公园内自然同行", people, segments)
+    mutated = prompt.replace("P1（老人）", "P1")
+
+    assert "video.speaker_identity_missing" in contract.validate_video_request(
         mutated, segments
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Mapping, Sequence
 
 
@@ -90,20 +91,26 @@ def validate_image_request(
     return issues
 
 
-def _person_ids(people: list[dict[str, object]]) -> tuple[str, str]:
+def _person_profiles(people: list[dict[str, object]]) -> tuple[tuple[str, str], dict[str, str]]:
     if len(people) != 2:
         raise ValueError("视频必须有两名不同人物")
     ids: list[str] = []
+    identities: dict[str, str] = {}
     for person in people:
         if not isinstance(person, Mapping):
             raise ValueError("视频必须有两名不同人物")
         identifier = person.get("id")
         if not isinstance(identifier, str) or not identifier.strip():
             raise ValueError("视频必须有两名不同人物")
-        ids.append(identifier.strip())
+        identity = person.get("identity")
+        if not isinstance(identity, str) or not identity.strip():
+            raise ValueError("视频人物必须包含身份映射")
+        identifier = identifier.strip()
+        ids.append(identifier)
+        identities[identifier] = identity.strip()
     if len(set(ids)) != 2:
         raise ValueError("视频必须有两名不同人物")
-    return ids[0], ids[1]
+    return (ids[0], ids[1]), identities
 
 
 def _validated_segments(
@@ -124,17 +131,23 @@ def _validated_segments(
             or isinstance(end, bool)
             or not isinstance(start, (int, float))
             or not isinstance(end, (int, float))
+            or not math.isfinite(float(start))
+            or not math.isfinite(float(end))
             or start < 0
+            or end > 15
             or end <= start
         ):
-            raise ValueError("视频时间段格式无效")
+            raise ValueError("视频时间段必须位于0–15秒且满足 start < end")
         if previous_end is not None and start < previous_end:
             raise ValueError("视频时间段不得重叠且必须按顺序")
         if not isinstance(speaker, str) or speaker not in person_ids:
             raise ValueError("视频时间段说话人无效")
         if previous_speaker == speaker:
             raise ValueError("视频时间段必须严格交替说话")
-        prepared.append((float(start), float(end), speaker, _clean_text(dialogue, "dialogue")))
+        cleaned_dialogue = _clean_text(dialogue, "dialogue")
+        if any(existing[3] == cleaned_dialogue for existing in prepared):
+            raise ValueError("视频台词不得重复")
+        prepared.append((float(start), float(end), speaker, cleaned_dialogue))
         previous_end = float(end)
         previous_speaker = speaker
     return prepared
@@ -152,13 +165,13 @@ def compile_video_prompt(
     """Compile a single-shot, two-person Chinese dialogue video prompt."""
     scene = _without_contract_blocks(
         _clean_text(base_prompt, "base_prompt"),
-        (VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK),
+        (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK),
     )
     _reject_product_appearance(scene)
-    person_ids = _person_ids(people)
+    person_ids, person_identities = _person_profiles(people)
     validated_segments = _validated_segments(segments, person_ids)
     dialogue_lines = [
-        f"{_format_second(start)}–{_format_second(end)}秒 {speaker}：{dialogue}"
+        f"{_format_second(start)}–{_format_second(end)}秒 speaker_id={speaker}（{person_identities[speaker]}）：{dialogue}"
         for start, end, speaker, dialogue in validated_segments
     ]
     return "\n\n".join((
@@ -209,4 +222,26 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]]) -> li
         return issues
     if any(text.count(dialogue) != 1 for dialogue in dialogues):
         issues.append("video.dialogue_exactly_once")
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        start, end = segment.get("start"), segment.get("end")
+        speaker = segment.get("speaker_id")
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, (int, float))
+            or not isinstance(end, (int, float))
+            or not math.isfinite(float(start))
+            or not math.isfinite(float(end))
+            or not isinstance(speaker, str)
+        ):
+            continue
+        binding = (
+            f"{_format_second(float(start))}–{_format_second(float(end))}秒 "
+            f"speaker_id={speaker}（"
+        )
+        if binding not in text:
+            issues.append("video.speaker_identity_missing")
+            break
     return issues
