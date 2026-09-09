@@ -73,3 +73,35 @@ Results:
 ## Concerns
 
 - The release archive intentionally remains untouched and its historical parity test is excluded as directed.
+
+## GPT Web legacy receipt compatibility follow-up
+
+### RED evidence
+
+Before changing the digest implementation, added a real persisted-action replay test and ran:
+
+```powershell
+python -m pytest tests/test_image_provider_selection.py -q -k "legacy_reason_digest_failure_receipt_replays"
+```
+
+Result: `1 failed, 33 deselected`. The test writes a failed `GPT_WEB_IMAGE_REQUIRED` action row with the legacy `hashlib.sha256(reason.encode()).hexdigest()` input digest and invokes the real `image-failed` CLI. The then-current JSON-wrapped digest rejected that replay as a different result.
+
+### GREEN evidence
+
+The runner now uses the exact legacy raw reason SHA-256 for GPT Web and only uses the sorted structured `{reason, submission_state}` digest for third-party API actions. Verification:
+
+```powershell
+python -m pytest tests/test_image_provider_selection.py -q -k "legacy_reason_digest_failure_receipt_replays or contradictory_submission_state or gpt_web_failure_replays"
+python -m pytest tests/test_image_provider_selection.py -q
+python -m pytest tests/test_pipeline_runtime_contract.py -q -k "not release_source_parity_and_security and not self_test and not git_diff"
+python skill-package/product-video-pipeline/scripts/self_test.py
+git diff --check
+```
+
+Results: `3 passed, 31 deselected`; `34 passed`; `29 passed, 1 deselected`; self-test passed without network or charges; `git diff --check` was clean. The third-party contradictory-state regression remains green.
+
+### Follow-up self-review
+
+- GPT Web ignores `submission_state` and exactly preserves its prior persisted-receipt digest format.
+- Third-party failure digest still binds both the reason and settlement input, so contradictory replays reject.
+- No VERSION, release ZIP, package artifact, or external/paid service changed.

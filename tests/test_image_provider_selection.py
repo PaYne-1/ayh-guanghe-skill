@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -550,3 +551,36 @@ def test_gpt_web_failure_replays_same_reason_across_submission_states(web_batch,
 
     assert runner.main([*base_args, "--submission-state", "unknown"]) == 0
     assert runner.load_or_create_state(batch, policy).image_budget_ledger == {}
+
+
+def test_gpt_web_legacy_reason_digest_failure_receipt_replays(web_batch, capsys):
+    runner, policy, batch, state = web_batch
+    action = runner.next_action(batch, state, policy)
+    reason = "legacy browser failure"
+    expected_result = {
+        "kind": "IMAGE_FAILURE_RECORDED",
+        "retry_pending": True,
+        "video_id": action["video_id"],
+        "artifact": action["artifact"],
+        "reason": reason,
+    }
+    row = state.model_actions[action["action_id"]]
+    row.update({
+        "status": "failed",
+        "input_digest": hashlib.sha256(reason.encode()).hexdigest(),
+        "result": expected_result,
+        "completed_at": "2026-09-09T00:00:00+00:00",
+    })
+    state.pending_action = None
+    runner.save_state(batch, state)
+
+    assert runner.main([
+        "image-failed", "--batch", str(batch), "--video-id", action["video_id"],
+        "--artifact", action["artifact"], "--reason", reason,
+        "--action-id", action["action_id"], "--submission-state", "unknown",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == expected_result
+    restored = runner.load_or_create_state(batch, policy)
+    assert restored.model_actions[action["action_id"]]["input_digest"] == (
+        hashlib.sha256(reason.encode()).hexdigest()
+    )

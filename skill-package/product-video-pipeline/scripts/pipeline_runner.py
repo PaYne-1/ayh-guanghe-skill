@@ -2008,12 +2008,13 @@ def _main_locked(args) -> int:
             row = _image_action_receipt(state, args.action_id)
             if row.get("video_id") != args.video_id or row.get("artifact") != args.artifact:
                 raise ValueError("图片失败与已保留动作不一致")
-            failure_receipt = {"reason": args.reason}
             if row.get("provider") == "third_party_api":
-                failure_receipt["submission_state"] = args.submission_state
-            digest = hashlib.sha256(
-                json.dumps(failure_receipt, ensure_ascii=False, sort_keys=True).encode()
-            ).hexdigest()
+                digest = hashlib.sha256(json.dumps(
+                    {"reason": args.reason, "submission_state": args.submission_state},
+                    ensure_ascii=False, sort_keys=True,
+                ).encode()).hexdigest()
+            else:
+                digest = hashlib.sha256(args.reason.encode()).hexdigest()
             if row["status"] != "reserved":
                 result = _finish_action(state, row, digest, {})
             else:
