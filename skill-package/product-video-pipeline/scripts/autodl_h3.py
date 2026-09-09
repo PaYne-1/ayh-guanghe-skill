@@ -24,7 +24,6 @@ WORKFLOW_ID = "minimax_h3_lightx2v_v5_15s"
 KNOWN_WORKFLOW_IDS = (
     WORKFLOW_ID,
     "minimax_h3_lightx2v",
-    "minimax_h3_image_audio_to_video_v2_15s",
 )
 QUERY_URL_TEMPLATE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow/result/{task_id}"
 
@@ -34,7 +33,8 @@ def extract_task_id(response: Dict[str, object]) -> str:
     if not task_id and isinstance(response.get("data"), dict):
         task_id = response["data"].get("task_id")
     if not task_id:
-        raise ValueError("AutoDL 响应中没有 task_id")
+        response_text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        raise ValueError(f"AutoDL 响应中没有 task_id：{response_text}")
     return str(task_id)
 
 
@@ -49,6 +49,22 @@ def _authorization(api_key: str, auth_scheme: str) -> str:
     if auth_scheme == "bearer":
         return f"Bearer {api_key}"
     raise ValueError("auth_scheme 只能是 bearer 或 raw")
+
+
+def validate_first_last_payload(payload: Dict[str, object]) -> None:
+    required = ("prompt", "duration", "resolution", "first_frame", "last_frame")
+    missing = [field for field in required if not payload.get(field)]
+    if missing:
+        raise ValueError("首尾帧 payload 缺少字段：" + ", ".join(missing))
+    if payload["duration"] != 15:
+        raise ValueError("首尾帧视频 duration 必须为 15")
+    if payload["first_frame"] == payload["last_frame"]:
+        raise ValueError("last_frame 必须独立生成，不得复用 first_frame")
+    prompt = str(payload["prompt"])
+    required_rules = ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+    missing_rules = [rule for rule in required_rules if rule not in prompt]
+    if missing_rules:
+        raise ValueError("prompt 缺少全程规则：" + ", ".join(missing_rules))
 
 
 def _json_request(
@@ -87,18 +103,28 @@ def submit_payload(
     confirm_paid: bool = False,
     workflow_id: str = WORKFLOW_ID,
     timeout: int = 60,
+    response_path: Optional[Path] = None,
 ) -> Dict[str, object]:
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("提交 payload 必须是 JSON 对象")
     if workflow_id not in KNOWN_WORKFLOW_IDS:
         raise ValueError(f"不支持的工作流 ID：{workflow_id}")
+    validate_first_last_payload(payload)
     submit_url = f"{COMFYUI_WORKFLOW_BASE}/{workflow_id}"
+    api_payload = dict(payload)
+    if workflow_id == "minimax_h3_lightx2v_v5_15s":
+        # AutoDL's current 15-second workflow exposes the two images as
+        # ref_image_0/ref_image_1, while the local workflow contract keeps
+        # their semantic roles as first_frame/last_frame.
+        api_payload["ref_image_0"] = api_payload.pop("first_frame")
+        api_payload["ref_image_1"] = api_payload.pop("last_frame")
+        api_payload.setdefault("seed", int(_request_hash(payload)[:12], 16))
     preview = {
         "dry_run": dry_run,
         "url": submit_url,
-        "request_hash": _request_hash(payload),
-        "payload": payload,
+        "request_hash": _request_hash(api_payload),
+        "payload": api_payload,
     }
     if dry_run:
         return preview
@@ -107,7 +133,9 @@ def submit_payload(
     api_key = api_key or os.environ.get("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
-    response = _json_request("POST", submit_url, api_key, auth_scheme, payload, timeout)
+    response = _json_request("POST", submit_url, api_key, auth_scheme, api_payload, timeout)
+    if response_path is not None:
+        _write_json(response_path, response)
     return {
         **preview,
         "dry_run": False,
@@ -142,6 +170,10 @@ def _task_data(response: Dict[str, object]) -> Dict[str, object]:
 
 def _status(response: Dict[str, object]) -> str:
     return str(_task_data(response).get("status", "unknown")).lower()
+
+
+def task_status(response: Dict[str, object]) -> str:
+    return _status(response)
 
 
 def poll_task(

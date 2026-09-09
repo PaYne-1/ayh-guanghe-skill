@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
@@ -59,7 +60,15 @@ IMPROVEMENT_TERMS = (
     "愿意下楼",
     "不用总麻烦",
 )
-DELIVERABLE_NAMES = {"视频.mp4", "封面图.png", "发布正文.md", "标题.txt", "分镜图.png"}
+DELIVERABLE_NAMES = {
+    "视频.mp4",
+    "封面图.png",
+    "发布正文.txt",
+    "话题标签.txt",
+    "标题.txt",
+    "分镜图.png",
+    "尾帧图.png",
+}
 WORK_DIR_NAME = "_工作文件"
 WORK_CATEGORIES = ("任务状态", "生成过程", "验收记录", "历史版本")
 TASK_STATE_PREFIXES = (
@@ -85,8 +94,31 @@ HISTORY_DIR_NAMES = {"失败版本", "视频版本"}
 ITEM_DIR_PATTERN = re.compile(r"^V\d{3}_")
 APPROVAL_LOG_NAME = "产出验收记录.json"
 APPROVAL_DECISIONS = {"passed", "failed", "revoked"}
+LEARNING_NODES = {
+    "content",
+    "storyboard",
+    "cover",
+    "audio",
+    "video",
+    "api",
+    "polling",
+    "download",
+    "review",
+}
 _APPROVAL_THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _APPROVAL_THREAD_LOCKS_GUARD = threading.Lock()
+_LEARNING_THREAD_LOCKS: Dict[str, threading.Lock] = {}
+_LEARNING_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _load_policy_module():
+    path = Path(__file__).with_name("pipeline_policy.py")
+    spec = importlib.util.spec_from_file_location("product_video_pipeline_policy", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 pipeline_policy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class BatchItem:
@@ -121,6 +153,38 @@ def _approval_log_lock(item_dir: Path):
     key = str(lock_path.resolve()).casefold()
     with _APPROVAL_THREAD_LOCKS_GUARD:
         thread_lock = _APPROVAL_THREAD_LOCKS.setdefault(key, threading.Lock())
+    with thread_lock:
+        with lock_path.open("a+b") as stream:
+            if stream.seek(0, os.SEEK_END) == 0:
+                stream.write(b"0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _learning_store_lock(knowledge_dir: Path):
+    lock_path = knowledge_dir.resolve() / ".learning-rules.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(lock_path).casefold()
+    with _LEARNING_THREAD_LOCKS_GUARD:
+        thread_lock = _LEARNING_THREAD_LOCKS.setdefault(key, threading.Lock())
     with thread_lock:
         with lock_path.open("a+b") as stream:
             if stream.seek(0, os.SEEK_END) == 0:
@@ -323,11 +387,36 @@ def _archive_root_artifact(
     return target
 
 
+def _publish_title_from_file(item_dir: Path) -> str:
+    title_path = item_dir / "标题.txt"
+    if not title_path.is_file():
+        raise ValueError("缺少已验收的标题.txt，无法确定视频交付文件名")
+    title_lines = [line.strip() for line in title_path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    publish_line = next(
+        (line for line in title_lines if re.match(r"^\s*发布标题\s*[:：]", line)),
+        title_lines[0] if title_lines else "",
+    )
+    raw_title = re.sub(r"^\s*(?:发布标题|标题)\s*[:：]\s*", "", publish_line).strip()
+    cleaned = "".join(character if character.isalnum() else " " for character in raw_title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        raise ValueError("标题.txt 未包含可用于视频文件名的汉字、字母或数字")
+    return cleaned
+
+
+def deliverable_root_path(item_dir: Path, artifact_name: str) -> Path:
+    if artifact_name not in DELIVERABLE_NAMES:
+        raise ValueError(f"未知产出名称：{artifact_name}")
+    if artifact_name == "视频.mp4":
+        return item_dir / f"{_publish_title_from_file(item_dir)}.mp4"
+    return item_dir / artifact_name
+
+
 def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
     item_dir = item_dir.resolve()
     artifact_name = str(event.get("artifact_name", ""))
     if artifact_name not in DELIVERABLE_NAMES or event.get("decision") != "passed":
-        raise ValueError("只有五项固定产出的 passed 事件可以晋升")
+        raise ValueError("只有七项固定产出的 passed 事件可以晋升")
     events = load_approval_events(item_dir)
     recorded = next((value for value in events if value.get("event_id") == event.get("event_id")), None)
     if recorded is None:
@@ -345,7 +434,7 @@ def promote_approved_artifact(item_dir: Path, event: Dict[str, object]) -> Path:
     if not source.is_file() or _sha256_file(source) != digest:
         raise ValueError("候选文件缺失或哈希已变化，不能晋升")
 
-    root_artifact = item_dir / artifact_name
+    root_artifact = deliverable_root_path(item_dir, artifact_name)
     if root_artifact.exists():
         if not root_artifact.is_file():
             raise ValueError(f"一级固定产出路径不是文件：{root_artifact}")
@@ -415,7 +504,13 @@ def audit_promoted_outputs(
     demoted = []
     missing = []
     for artifact_name in sorted(DELIVERABLE_NAMES):
-        root_artifact = item_dir / artifact_name
+        try:
+            root_artifact = deliverable_root_path(item_dir, artifact_name)
+        except ValueError as exc:
+            if artifact_name != "视频.mp4" or (item_dir / "标题.txt").exists():
+                errors.append({"artifact_name": artifact_name, "error": str(exc)})
+            missing.append(artifact_name)
+            continue
         if not root_artifact.exists():
             missing.append(artifact_name)
             continue
@@ -447,6 +542,35 @@ def audit_promoted_outputs(
             }
         )
 
+    expected_video = None
+    try:
+        expected_video = deliverable_root_path(item_dir, "视频.mp4")
+    except ValueError:
+        pass
+    for stray_video in sorted(item_dir.glob("*.mp4"), key=lambda path: path.name.casefold()):
+        if expected_video is not None and stray_video == expected_video:
+            continue
+        if not stray_video.is_file():
+            errors.append({"artifact_name": "视频.mp4", "error": "一级视频产出路径不是文件"})
+            continue
+        digest = _sha256_file(stray_video)
+        target = _archive_root_artifact(
+            item_dir,
+            stray_video,
+            "已撤换产出",
+            audit_time,
+            dry_run=dry_run,
+        )
+        demoted.append(
+            {
+                "artifact_name": "视频.mp4",
+                "physical_name": stray_video.name,
+                "sha256": digest,
+                "target": str(target),
+                "latest_event": None,
+            }
+        )
+
     return {
         "item_dir": str(item_dir),
         "dry_run": dry_run,
@@ -458,7 +582,7 @@ def audit_promoted_outputs(
     }
 
 
-def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, object]:
+def audit_batch_outputs(batch_dir: Path, dry_run: bool = False, video_ids: Optional[List[str]] = None) -> Dict[str, object]:
     batch_dir = batch_dir.resolve()
     if not batch_dir.is_dir():
         raise ValueError(f"批次目录不存在：{batch_dir}")
@@ -468,6 +592,8 @@ def audit_batch_outputs(batch_dir: Path, dry_run: bool = False) -> Dict[str, obj
     )
     if not item_dirs:
         raise ValueError(f"批次目录第一层没有 VNNN_ 单条任务目录：{batch_dir}")
+    if video_ids is not None:
+        item_dirs = [item for item in item_dirs if item.name.split("_", 1)[0] in video_ids]
     return {
         "batch_dir": str(batch_dir),
         "dry_run": dry_run,
@@ -487,7 +613,11 @@ def _audit_result_has_errors(result: Dict[str, object]) -> bool:
 def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
     if artifact_name not in DELIVERABLE_NAMES:
         raise ValueError(f"未知产出名称：{artifact_name}")
-    root_artifact = item_dir / artifact_name
+    item_dir = item_dir.resolve()
+    try:
+        root_artifact = deliverable_root_path(item_dir, artifact_name)
+    except ValueError:
+        return None
     if not root_artifact.is_file():
         return None
     try:
@@ -498,9 +628,16 @@ def validated_promoted_artifact_path(item_dir: Path, artifact_name: str) -> Opti
     return root_artifact if latest is not None and latest.get("decision") == "passed" else None
 
 
-def classify_legacy_entry(path: Path) -> Optional[Tuple[str, Path]]:
-    if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME:
+def classify_legacy_entry(item_dir: Path, path: Path) -> Optional[Tuple[str, Path]]:
+    expected_video = None
+    try:
+        expected_video = deliverable_root_path(item_dir, "视频.mp4")
+    except ValueError:
+        pass
+    if path.name in DELIVERABLE_NAMES or path.name == WORK_DIR_NAME or path == expected_video:
         return None
+    if path.name == "发布正文.md":
+        return "历史版本", Path("旧格式") / path.name
     if path.name in HISTORY_DIR_NAMES:
         return "历史版本", Path(path.name)
     if path.name.startswith(TASK_STATE_PREFIXES):
@@ -562,7 +699,7 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
     reserved_duplicate_targets = set()
     conflicts = []
     for source in sorted(item_dir.iterdir(), key=lambda path: path.name.casefold()):
-        classification = classify_legacy_entry(source)
+        classification = classify_legacy_entry(item_dir, source)
         if classification is None:
             continue
         category, relative_target = classification
@@ -579,6 +716,8 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
     if not dry_run:
         output_audit = audit_promoted_outputs(item_dir)
         ensure_work_dirs(item_dir)
+        plan = [(source, target) for source, target in plan if source.exists()]
+        duplicates = [entry for entry in duplicates if entry[0].exists()]
         for source, target in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
@@ -591,10 +730,12 @@ def organize_item_dir(item_dir: Path, dry_run: bool = False) -> Dict[str, object
         remaining_forbidden = [
             path.name
             for path in item_dir.iterdir()
-            if classify_legacy_entry(path) is not None and path not in planned_sources
+            if classify_legacy_entry(item_dir, path) is not None and path not in planned_sources
         ]
     else:
-        remaining_forbidden = [path.name for path in item_dir.iterdir() if classify_legacy_entry(path) is not None]
+        remaining_forbidden = [
+            path.name for path in item_dir.iterdir() if classify_legacy_entry(item_dir, path) is not None
+        ]
     audit_error_names = [
         str(error.get("artifact_name"))
         for error in output_audit.get("errors", [])
@@ -703,6 +844,314 @@ def _product_id(product_name: str) -> str:
     return f"{sanitize_component(product_name, 24)}_{digest}"
 
 
+def capture_learning_issue(
+    *,
+    knowledge_dir: Path,
+    batch_dir: Path,
+    video_id: str,
+    node: str,
+    user_feedback: str,
+    symptom: str,
+    root_cause: str,
+    solution: str,
+    prevention_rule: str,
+    validation_method: str,
+    validation_expected: str,
+    evidence_paths: Sequence[Path] = (),
+    model: Optional[str] = None,
+    channel: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Path:
+    if node not in LEARNING_NODES:
+        raise ValueError(f"未知学习节点：{node}")
+    required = {
+        "用户反馈": user_feedback,
+        "失败表现": symptom,
+        "根因": root_cause,
+        "解决方案": solution,
+        "预防规则": prevention_rule,
+        "验证方法": validation_method,
+        "预期结果": validation_expected,
+    }
+    empty = [name for name, value in required.items() if not str(value).strip()]
+    if empty:
+        raise ValueError("自动复盘缺少：" + "、".join(empty))
+
+    batch_dir = batch_dir.resolve()
+    confirmation = read_json(batch_dir / "启动确认单.json")
+    if confirmation.get("run_mode") != "learning":
+        raise ValueError("只有学习模式可以记录新的候选经验")
+
+    timestamp = (now or datetime.now().astimezone()).isoformat()
+    fingerprint_source = "|".join(
+        (
+            str(confirmation.get("product_name", "")),
+            node,
+            video_id,
+            user_feedback.strip(),
+            symptom.strip(),
+        )
+    )
+    issue_id = "issue_" + hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:16]
+    evidence = []
+    for source in evidence_paths:
+        resolved = source.resolve()
+        if not resolved.is_file():
+            raise ValueError(f"学习证据文件不存在：{resolved}")
+        evidence.append({"path": str(resolved), "sha256": _sha256_file(resolved)})
+
+    product_name = str(confirmation.get("product_name", ""))
+    value = {
+        "issue_id": issue_id,
+        "status": "candidate",
+        "scope": {
+            "product_id": _product_id(product_name) if product_name else None,
+            "node": node,
+            "model": model,
+            "channel": channel,
+        },
+        "user_feedback": user_feedback.strip(),
+        "symptom": symptom.strip(),
+        "root_cause": root_cause.strip(),
+        "solution": solution.strip(),
+        "prevention_rule": prevention_rule.strip(),
+        "validation": {
+            "method": validation_method.strip(),
+            "expected": validation_expected.strip(),
+            "result": "pending",
+        },
+        "evidence": evidence,
+        "source_batch": str(batch_dir),
+        "source_video_id": video_id,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    knowledge_dir = knowledge_dir.resolve()
+    target = knowledge_dir / "候选经验" / f"{issue_id}.json"
+    with _learning_store_lock(knowledge_dir):
+        existing = read_json(target)
+        if existing is not None:
+            existing.setdefault("duplicate_events", []).append(
+                {"at": timestamp, "evidence": evidence}
+            )
+            existing["updated_at"] = timestamp
+            atomic_write_json(target, existing)
+        else:
+            atomic_write_json(target, value)
+    return target
+
+
+def _learning_scope_key(scope: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    return tuple(scope.get(key) for key in ("product_id", "node", "model", "channel"))
+
+
+def _validate_learning_issue_unlocked(
+    *,
+    knowledge_dir: Path,
+    batch_dir: Path,
+    video_id: str,
+    issue_id: str,
+    result: str,
+    verified_candidate: Optional[Path],
+    now: Optional[datetime] = None,
+) -> Optional[Path]:
+    if result not in {"passed", "failed", "inconclusive"}:
+        raise ValueError("学习验证结果无效")
+
+    knowledge_dir = knowledge_dir.resolve()
+    batch_dir = batch_dir.resolve()
+    confirmation = read_json(batch_dir / "启动确认单.json")
+    if confirmation.get("run_mode") != "learning":
+        raise ValueError("只有学习模式可以验证并升级候选经验")
+
+    issue_path = knowledge_dir / "候选经验" / f"{issue_id}.json"
+    issue = read_json(issue_path)
+    if not issue:
+        raise ValueError(f"候选经验不存在：{issue_id}")
+    if issue.get("source_video_id") != video_id:
+        raise ValueError("候选经验与视频 ID 不匹配")
+
+    item = _find_item(batch_dir, video_id)
+    task = read_json(work_path(item, "任务状态", "任务信息.json"))
+    if int(task.get("retry_count", 0)) != 1:
+        raise ValueError("只有 V02 唯一一次重跑可以验证候选经验")
+
+    timestamp = (now or datetime.now().astimezone()).isoformat()
+    issue["validation"]["result"] = result
+    issue["validation"]["verified_at"] = timestamp
+    issue["updated_at"] = timestamp
+    if result != "passed":
+        issue["status"] = result
+        atomic_write_json(issue_path, issue)
+        return None
+
+    if verified_candidate is None:
+        raise ValueError("验证通过必须绑定实际候选文件")
+    verified_candidate = verified_candidate.resolve()
+    if not verified_candidate.is_file():
+        raise ValueError(f"验证候选不存在：{verified_candidate}")
+    digest = _sha256_file(verified_candidate)
+    scope = issue["scope"]
+    scope_key = _learning_scope_key(scope)
+    rule_seed = "|".join(str(value or "*") for value in scope_key)
+    rule_id = "rule_" + hashlib.sha256(
+        (rule_seed + "|" + issue["prevention_rule"]).encode("utf-8")
+    ).hexdigest()[:16]
+    rules_dir = knowledge_dir / "正式规则"
+    existing_rules = []
+    if rules_dir.exists():
+        for path in sorted(rules_dir.glob("*.json")):
+            value = read_json(path)
+            if value and _learning_scope_key(value.get("scope", {})) == scope_key:
+                existing_rules.append((path, value))
+    version = max((int(value.get("version", 0)) for _, value in existing_rules), default=0) + 1
+    target = rules_dir / f"{rule_id}.json"
+    previous_same_rule = read_json(target, {})
+    rule = {
+        "rule_id": rule_id,
+        "version": version,
+        "status": "active",
+        "scope": scope,
+        "trigger": issue["symptom"],
+        "required_action": issue["prevention_rule"],
+        "validation_check": issue["validation"]["expected"],
+        "source_issue_id": issue_id,
+        "source_batch": str(batch_dir),
+        "source_video_id": video_id,
+        "verified_candidate_sha256": digest,
+        "verified_at": timestamp,
+        "hit_count": int(previous_same_rule.get("hit_count", 0)),
+        "last_hit_at": previous_same_rule.get("last_hit_at"),
+    }
+    for path, value in existing_rules:
+        if path == target or value.get("status") != "active":
+            continue
+        value["status"] = "superseded"
+        value["superseded_by"] = rule_id
+        value["superseded_at"] = timestamp
+        atomic_write_json(path, value)
+    atomic_write_json(target, rule)
+
+    issue["status"] = "promoted"
+    issue["promoted_rule_id"] = rule_id
+    atomic_write_json(issue_path, issue)
+    return target
+
+
+def validate_learning_issue(
+    *,
+    knowledge_dir: Path,
+    batch_dir: Path,
+    video_id: str,
+    issue_id: str,
+    result: str,
+    verified_candidate: Optional[Path],
+    now: Optional[datetime] = None,
+) -> Optional[Path]:
+    with _learning_store_lock(knowledge_dir):
+        return _validate_learning_issue_unlocked(
+            knowledge_dir=knowledge_dir,
+            batch_dir=batch_dir,
+            video_id=video_id,
+            issue_id=issue_id,
+            result=result,
+            verified_candidate=verified_candidate,
+            now=now,
+        )
+
+
+def load_matching_rules(
+    knowledge_dir: Path,
+    *,
+    product_id: Optional[str],
+    node: Optional[str],
+    model: Optional[str] = None,
+    channel: Optional[str] = None,
+) -> List[dict]:
+    rules_dir = knowledge_dir.resolve() / "正式规则"
+    matched = []
+    paths = sorted(rules_dir.glob("*.json")) if rules_dir.exists() else ()
+    for path in paths:
+        rule = read_json(path)
+        if not rule or rule.get("status") != "active":
+            continue
+        scope = rule.get("scope", {})
+        checks = (
+            ("product_id", product_id),
+            ("node", node),
+            ("model", model),
+            ("channel", channel),
+        )
+        if any(
+            value is not None and scope.get(key) not in (None, value)
+            for key, value in checks
+        ):
+            continue
+        rule["_specificity"] = sum(scope.get(key) is not None for key, _ in checks)
+        matched.append(rule)
+    matched.sort(
+        key=lambda value: (
+            value["_specificity"],
+            value.get("verified_at", ""),
+            value["rule_id"],
+        ),
+        reverse=True,
+    )
+    for rule in matched:
+        rule.pop("_specificity", None)
+    return matched
+
+
+def prepare_node_rules(
+    *,
+    knowledge_dir: Path,
+    batch_dir: Path,
+    video_id: str,
+    node: str,
+    model: Optional[str] = None,
+    channel: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Path:
+    if node not in LEARNING_NODES:
+        raise ValueError(f"未知学习节点：{node}")
+    knowledge_dir = knowledge_dir.resolve()
+    batch_dir = batch_dir.resolve()
+    item = _find_item(batch_dir, video_id)
+    confirmation = read_json(batch_dir / "启动确认单.json")
+    product_id = confirmation.get("product_id")
+    if not product_id and confirmation.get("product_name"):
+        product_id = _product_id(str(confirmation["product_name"]))
+    timestamp = (now or datetime.now().astimezone()).isoformat()
+    target = work_path(item, "任务状态", f"生效规则_{node}.json")
+
+    with _learning_store_lock(knowledge_dir):
+        matched = load_matching_rules(
+            knowledge_dir,
+            product_id=product_id,
+            node=node,
+            model=model,
+            channel=channel,
+        )
+        for rule in matched:
+            path = knowledge_dir / "正式规则" / f"{rule['rule_id']}.json"
+            current = read_json(path)
+            current["hit_count"] = int(current.get("hit_count", 0)) + 1
+            current["last_hit_at"] = timestamp
+            atomic_write_json(path, current)
+        atomic_write_json(
+            target,
+            {
+                "video_id": video_id,
+                "node": node,
+                "model": model,
+                "channel": channel,
+                "prepared_at": timestamp,
+                "rules": matched,
+            },
+        )
+    return target
+
+
 def _record_selling_points(
     knowledge_dir: Path,
     product_name: str,
@@ -757,12 +1206,21 @@ def initialize_batch(
     knowledge_dir: Path,
     now: Optional[datetime] = None,
     text_provider: str = "任务开始前确认",
-    image_provider: str = "原生生图优先；无原生能力时使用已确认 API",
+    image_provider: str,
+    image_api_config: object | None = None,
 ) -> BatchContext:
     if run_mode not in {"learning", "auto"}:
         raise ValueError("运行模式只能是 learning 或 auto")
     if resolution not in {"768P", "2K"}:
         raise ValueError("分辨率只能是 768P 或 2K")
+    policy_module = _load_policy_module()
+    image_provider = policy_module.normalize_image_provider(image_provider)
+    if image_provider == "third_party_api":
+        normalized_image_api = policy_module.normalize_image_api_config(image_api_config)
+    elif image_api_config not in (None, {}):
+        raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+    else:
+        normalized_image_api = {}
     try:
         if Decimal(max_budget_yuan) <= 0:
             raise ValueError("本批次最高预算必须大于 0")
@@ -810,18 +1268,33 @@ def initialize_batch(
         selling_points=selling_points,
         now=now,
     )
+    product_id = _product_id(product_name)
+    matched_rules = load_matching_rules(
+        knowledge_dir,
+        product_id=product_id,
+        node=None,
+        model=None,
+        channel=None,
+    )
     confirmation = {
         "confirmed": False,
         "confirmation_scope": "任务开始前一次性确认；运行中不补问普通配置",
         "product_dir": str(product_dir),
         "product_name": product_name,
+        "product_id": product_id,
         "product_images": [str(path) for path in images],
         "selling_points": list(selling_points),
         "total_videos": total_videos,
         "allocation": {point: allocated.count(point) for point in dict.fromkeys(allocated)},
         "run_mode": run_mode,
+        "startup_authorization": (
+            "initial_user_reply"
+            if run_mode == "auto"
+            else "learning_review_required"
+        ),
         "text_provider": text_provider,
         "image_provider": image_provider,
+        "image_api_config": normalized_image_api,
         "cover_reference_dir": str(cover_reference_dir.resolve()),
         "video_provider": "AutoDL.Art MiniMax-H3",
         "duration_seconds": 15,
@@ -829,19 +1302,33 @@ def initialize_batch(
         "resolution": resolution,
         "aigc_watermark": False,
         "audio": "MiniMax-H3 原生对白；按人物清单匹配音色；轻微环境声；无 BGM",
-        "image_max_attempts": 3,
+        "image_max_attempts": 2,
         "video_max_reruns": 1,
-        "concurrency": 3,
+        "concurrency": 1,
         "poll_interval_seconds": 20,
         "poll_timeout_seconds": 3600,
         "max_budget_yuan": str(Decimal(max_budget_yuan)),
         "live_price": "任务开始前查询并填写",
         "knowledge_library": str(library_path.resolve()),
+        "formal_rules_library": str((knowledge_dir.resolve() / "正式规则")),
+        "matched_learning_rules": [
+            {
+                "rule_id": rule["rule_id"],
+                "node": rule.get("scope", {}).get("node"),
+                "required_action": rule["required_action"],
+            }
+            for rule in matched_rules
+        ],
         "created_at": now.isoformat(),
     }
     atomic_write_json(batch_dir / "启动确认单.json", confirmation)
     atomic_write_json(batch_dir / "批次任务表.json", {"items": task_rows})
-    atomic_write_text(batch_dir / "批次汇总.md", "# 批次汇总\n\n状态：等待启动确认\n")
+    startup_status = (
+        "自动模式已由首次回复授权 V01，等待逐条价格后连续执行"
+        if run_mode == "auto"
+        else "等待学习模式启动确认"
+    )
+    atomic_write_text(batch_dir / "批次汇总.md", f"# 批次汇总\n\n状态：{startup_status}\n")
     return BatchContext(batch_dir, images, items)
 
 
@@ -858,8 +1345,52 @@ def _closing_is_valid(dialogue: str, product_name: str) -> bool:
     return used and has_product and after and benefit and cta
 
 
+def _has_forbidden_product_appearance(text: object) -> bool:
+    """Use the central prompt contract without compiling model content early."""
+    path = Path(__file__).with_name("generation_prompt_contract.py")
+    spec = importlib.util.spec_from_file_location(
+        "product_video_generation_prompt_contract", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 generation_prompt_contract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return bool(module.has_forbidden_product_appearance(text))
+
+
 def validate_content_package(package: Dict[str, object], profile: Dict[str, object]) -> List[str]:
     issues: List[str] = []
+    if not isinstance(package, dict):
+        return ["content.object_required"]
+    # Validate shapes before semantic checks; model JSON is untrusted input.
+    for key in ("publish_title", "cover_title", "storyboard_prompt", "last_frame_prompt", "video_prompt", "publish_body"):
+        if not isinstance(package.get(key, ""), str):
+            issues.append(f"content.{key}.string_required")
+    for key in ("storyboard_people", "hashtags"):
+        values = package.get(key)
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            issues.append(f"content.{key}.string_list_required")
+    for key in ("people", "script_segments"):
+        values = package.get(key)
+        if not isinstance(values, list) or any(not isinstance(v, dict) for v in values):
+            issues.append(f"content.{key}.object_list_required")
+    if issues:
+        return issues
+    for person in package["people"]:
+        if any(not isinstance(person.get(key), str) or not person[key].strip() for key in ("id", "identity", "gender", "age_feel", "position", "action")) or type(person.get("speaks")) is not bool:
+            issues.append("people.field_types")
+    for segment in package["script_segments"]:
+        if any(type(segment.get(key)) not in (int, float) for key in ("start", "end")) or any(not isinstance(segment.get(key), str) or not segment[key].strip() for key in ("speaker_id", "dialogue")):
+            issues.append("script.field_types")
+    if issues:
+        return list(dict.fromkeys(issues))
+    if not package.get("storyboard_prompt", "").strip():
+        issues.append("content.storyboard_prompt_missing")
+    if any(
+        _has_forbidden_product_appearance(package[key])
+        for key in ("storyboard_prompt", "last_frame_prompt", "video_prompt")
+    ):
+        issues.append("product.appearance_description_forbidden")
 
     title = str(package.get("publish_title", ""))
     required_title_term = str(profile["required_title_term"])
@@ -878,6 +1409,8 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
     if not people or any(not required_person_fields <= set(person) for person in people if isinstance(person, dict)):
         issues.append("people.fields_missing")
     people_ids = [str(person.get("id")) for person in people if isinstance(person, dict)]
+    if len(people_ids) != 2 or len(set(people_ids)) != 2:
+        issues.append("people.exactly_two_required")
     storyboard_people = [str(value) for value in package.get("storyboard_people", [])]
     if people_ids != storyboard_people:
         issues.append("people.mismatch")
@@ -888,17 +1421,29 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
         issues.append("script.timeline")
     if any(str(segment.get("speaker_id")) not in people_ids for segment in segments if isinstance(segment, dict)):
         issues.append("people.offscreen_speaker")
+    segment_speakers = {
+        str(segment.get("speaker_id")) for segment in segments if isinstance(segment, dict) and segment.get("speaker_id")
+    }
+    if len(segment_speakers) != 2 or segment_speakers != set(people_ids):
+        issues.append("script.exactly_two_speakers_required")
     closing = str(segments[-1].get("dialogue", "")) if segments and isinstance(segments[-1], dict) else ""
     if not _closing_is_valid(closing, str(profile["closing_product_name"])):
         issues.append("closing.missing_improvement_and_cta")
 
     video_prompt = str(package.get("video_prompt", ""))
+    if not str(package.get("last_frame_prompt", "")).strip():
+        issues.append("content.tail_frame_prompt_missing")
     if any(term.casefold() in video_prompt.casefold() for term in TURNING_TERMS):
         issues.append("motion.turning_forbidden")
     if any(term in video_prompt for term in FOLDING_PROCESS_TERMS):
         issues.append("folding.dynamic_process_forbidden")
     if not any(term in video_prompt for term in ("一镜到底", "固定镜头", "同一个镜头")):
         issues.append("shot.single_required")
+    if any(
+        rule not in video_prompt
+        for rule in ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+    ):
+        issues.append("shot.full_duration_rules_missing")
 
     body = str(package.get("publish_body", ""))
     body_chars = _han_count(body)
@@ -969,9 +1514,16 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
         now,
     )
     _write_candidate_preserving_previous(item_dir, "分镜提示词.txt", str(package["storyboard_prompt"]), now)
+    _write_candidate_preserving_previous(item_dir, "合理尾帧提示词.txt", str(package["last_frame_prompt"]), now)
     _write_candidate_preserving_previous(item_dir, "视频提示词.txt", str(package["video_prompt"]), now)
-    tags = " ".join(package["hashtags"])
-    _write_candidate_preserving_previous(item_dir, "发布正文.md", f"{package['publish_body']}\n\n{tags}\n", now)
+    _write_candidate_preserving_previous(item_dir, "封面标题.txt", str(package["cover_title"]), now)
+    _write_candidate_preserving_previous(
+        item_dir, "封面提示词.txt",
+        "竖屏9:16，2160×3840。参考分镜及产品图保持人物与产品结构，参考风格图生成完整电商封面。"
+        + "准确绘制标题：" + str(package["cover_title"]) + "。不要其他文字。", now,
+    )
+    _write_candidate_preserving_previous(item_dir, "发布正文.txt", f"{package['publish_body']}\n", now)
+    _write_candidate_preserving_previous(item_dir, "话题标签.txt", " ".join(package["hashtags"]) + "\n", now)
 
 
 def _find_item(batch_dir: Path, video_id: str) -> Path:
@@ -1001,6 +1553,7 @@ def record_task(
             "task_id": task_id,
             "request_id": request_id,
             "request_hash": request_hash,
+            "submission_pending": False,
             "status": status,
             "estimated_cost_yuan": estimated_cost_yuan,
             "updated_at": datetime.now().astimezone().isoformat(),
@@ -1016,9 +1569,54 @@ def record_task(
     atomic_write_json(table_path, table)
 
 
+def start_rerun(batch_dir: Path, video_id: str, now: Optional[datetime] = None) -> Path:
+    batch_dir = batch_dir.resolve()
+    item_dir = _find_item(batch_dir, video_id)
+    task_path = work_path(item_dir, "任务状态", "任务信息.json")
+    task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
+    if int(task.get("retry_count", 0)) != 0:
+        raise ValueError("V02 是唯一一次重跑，禁止再次创建重跑")
+    previous_submission = {
+        key: task.get(key)
+        for key in ("task_id", "request_id", "request_hash", "estimated_cost_yuan")
+        if task.get(key) is not None
+    }
+    if previous_submission:
+        task.setdefault("submission_history", []).append(
+            {"version": "V01", **previous_submission}
+        )
+    task.update(
+        {
+            "task_id": None,
+            "request_id": None,
+            "request_hash": None,
+            "estimated_cost_yuan": None,
+        }
+    )
+    task["retry_count"] = 1
+    task["status"] = "V02_READY"
+    task["rerun_started_at"] = (now or datetime.now().astimezone()).isoformat()
+    atomic_write_json(task_path, task)
+    version_dir = work_path(item_dir, "历史版本", "视频版本/V02_唯一一次重跑")
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    table_path = batch_dir / "批次任务表.json"
+    table = read_json(table_path, {"items": []})
+    found = False
+    for row in table["items"]:
+        if row.get("video_id") == video_id:
+            row.update(task)
+            found = True
+            break
+    if not found:
+        table["items"].append(task)
+    atomic_write_json(table_path, table)
+    return task_path
+
+
 def _safe_file_url(item_dir: Path, filename: str) -> str:
     path = validated_promoted_artifact_path(item_dir, filename)
-    return quote(f"{item_dir.name}/{filename}") if path is not None else ""
+    return quote(f"{item_dir.name}/{path.name}") if path is not None else ""
 
 
 def _review_candidate_path(item_dir: Path, artifact_name: str) -> Optional[Path]:
@@ -1045,11 +1643,13 @@ def _review_media(batch_dir: Path, item_dir: Path, artifact_name: str) -> Dict[s
         return {"url": "", "status": "尚无候选", "source_path": "", "sha256": ""}
     relative_item = path.relative_to(item_dir).as_posix()
     relative_batch = path.relative_to(batch_dir).as_posix()
+    task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
     return {
         "url": quote(relative_batch),
         "status": status,
         "source_path": relative_item,
         "sha256": _sha256_file(path),
+        "version": "V02" if task.get("retry_count") == 1 else "V01",
     }
 
 
@@ -1063,17 +1663,21 @@ def _organization_result_has_errors(result: Dict[str, object]) -> bool:
     )
 
 
-def build_review_report(batch_dir: Path) -> Path:
+def build_review_report(batch_dir: Path, video_ids: Optional[List[str]] = None) -> Path:
     batch_dir = batch_dir.resolve()
     cards = []
     for item_dir in sorted(path for path in batch_dir.iterdir() if path.is_dir() and re.match(r"V\d{3}_", path.name)):
         video_id = item_dir.name.split("_", 1)[0]
+        if video_ids is not None and video_id not in video_ids:
+            continue
         title_path = validated_promoted_artifact_path(item_dir, "标题.txt") or _review_candidate_path(item_dir, "标题.txt")
         title = title_path.read_text(encoding="utf-8") if title_path is not None else "标题尚无候选"
         task = read_json(read_compatible_path(item_dir, "任务状态", "任务信息.json"), {})
         auto_qa_path = read_compatible_path(item_dir, "验收记录", "自动验收报告.md")
         auto_qa = auto_qa_path.read_text(encoding="utf-8") if auto_qa_path.exists() else "尚无自动验收报告"
         video = _review_media(batch_dir, item_dir, "视频.mp4")
+        if not video["url"]:
+            continue
         cover = _review_media(batch_dir, item_dir, "封面图.png")
         video_tag = f'<video controls preload="metadata" src="{video["url"]}"></video>' if video["url"] else '<p class="missing">视频尚未下载</p>'
         cover_tag = f'<img src="{cover["url"]}" alt="{video_id} 封面">' if cover["url"] else ""
@@ -1081,7 +1685,7 @@ def build_review_report(batch_dir: Path) -> Path:
             f'视频：{video["status"]}；候选：{video["source_path"] or "无"}；SHA-256：{video["sha256"] or "无"}'
         )
         cards.append(
-            f'''<section class="video-card" data-video-id="{html.escape(video_id)}" data-video-source="{html.escape(video["source_path"])}" data-video-sha256="{html.escape(video["sha256"])}">
+            f'''<section class="video-card" data-video-id="{html.escape(video_id)}" data-video-source="{html.escape(video["source_path"])}" data-video-sha256="{html.escape(video["sha256"])}" data-video-version="{html.escape(video["version"])}">
   <h2>{html.escape(video_id)}</h2>
   <div class="media">{video_tag}{cover_tag}</div>
   <p>{video_evidence}</p>
@@ -1111,7 +1715,7 @@ document.getElementById('complete').addEventListener('click',()=>{{
     const reason=card.querySelector('.reason').value.trim();
     if(!choice) error='每个视频都必须选择通过或不通过';
     if(choice && choice.value==='failed' && !reason) error='不通过的视频必须填写原因';
-    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim(),artifacts:{{'视频.mp4':{{source_path:card.dataset.videoSource,sha256:card.dataset.videoSha256}}}}}});
+    items.push({{video_id:card.dataset.videoId,decision:choice?choice.value:'',reason,suggestion:card.querySelector('.suggestion').value.trim(),artifacts:{{'视频.mp4':{{source_path:card.dataset.videoSource,sha256:card.dataset.videoSha256,version:card.dataset.videoVersion}}}}}});
   }});
   if(error){{document.getElementById('error').textContent=error;return;}}
   const blob=new Blob([JSON.stringify({{completed_at:new Date().toISOString(),items}},null,2)],{{type:'application/json'}});
@@ -1135,7 +1739,7 @@ def record_review(batch_dir: Path, result_path: Path, knowledge_dir: Path) -> No
             raise ValueError("不通过的视频必须填写原因")
     atomic_write_json(batch_dir / "批次验收结果.json", result)
     markdown = ["# 批次验收结果", ""]
-    candidates_dir = knowledge_dir.resolve() / "候选经验"
+    confirmation = read_json(batch_dir / "启动确认单.json", {})
     for decision in items:
         item_dir = _find_item(batch_dir, decision["video_id"])
         item_md = (
@@ -1144,19 +1748,33 @@ def record_review(batch_dir: Path, result_path: Path, knowledge_dir: Path) -> No
         )
         atomic_write_text(work_path(item_dir, "验收记录", "人工验收结果.md"), item_md)
         markdown.append(f"- {decision['video_id']}：{decision['decision']}；{decision.get('reason', '')}")
-        if decision["decision"] == "failed":
-            candidate_id = f"{decision['video_id']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            atomic_write_json(
-                candidates_dir / f"{candidate_id}.json",
-                {
-                    "candidate_id": candidate_id,
-                    "status": "candidate",
-                    "video_id": decision["video_id"],
-                    "issue": decision["reason"],
-                    "suggestion": decision.get("suggestion", ""),
-                    "created_at": datetime.now().astimezone().isoformat(),
-                    "promotion_rule": "仅在重跑通过且学习模式获得用户确认后转为正式规则",
-                },
+        if decision["decision"] == "failed" and confirmation.get("run_mode") == "learning":
+            reason = str(decision["reason"]).strip()
+            suggestion = str(decision.get("suggestion", "")).strip()
+            node = str(decision.get("node", "video"))
+            capture_learning_issue(
+                knowledge_dir=knowledge_dir,
+                batch_dir=batch_dir,
+                video_id=decision["video_id"],
+                node=node,
+                user_feedback=reason,
+                symptom=str(decision.get("symptom") or reason),
+                root_cause=str(decision.get("root_cause") or "未知，待 V02 验证"),
+                solution=str(decision.get("solution") or suggestion or f"针对用户反馈修正{node}节点"),
+                prevention_rule=str(
+                    decision.get("prevention_rule")
+                    or suggestion
+                    or f"进入{node}节点前检查并规避：{reason}"
+                ),
+                validation_method=str(
+                    decision.get("validation_method")
+                    or "核对 V02 对应自动检查结果并取得用户明确通过"
+                ),
+                validation_expected=str(
+                    decision.get("validation_expected") or f"V02 不再出现：{reason}"
+                ),
+                model=decision.get("model"),
+                channel=decision.get("channel"),
             )
     atomic_write_text(batch_dir / "批次验收结果.md", "\n".join(markdown) + "\n")
 
@@ -1182,6 +1800,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--max-budget", required=True)
     init.add_argument("--cover-reference-dir", type=Path, required=True)
     init.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
+    init.add_argument("--image-provider", choices=("gpt_web", "third_party_api"), required=True)
+    init.add_argument("--image-api-config", type=Path)
 
     validate = subparsers.add_parser("validate-content", help="校验并保存一条结构化策划内容")
     validate.add_argument("--item-dir", type=Path, required=True)
@@ -1203,6 +1823,48 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--batch", type=Path, required=True)
     record.add_argument("--result", type=Path, required=True)
     record.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
+
+    issue = subparsers.add_parser("record-issue", help="记录学习模式用户问题并形成结构化候选经验")
+    issue.add_argument("--knowledge-dir", type=Path, required=True)
+    issue.add_argument("--batch", type=Path, required=True)
+    issue.add_argument("--video-id", required=True)
+    issue.add_argument("--node", choices=sorted(LEARNING_NODES), required=True)
+    issue.add_argument("--feedback", required=True)
+    issue.add_argument("--symptom", required=True)
+    issue.add_argument("--root-cause", required=True)
+    issue.add_argument("--solution", required=True)
+    issue.add_argument("--prevention-rule", required=True)
+    issue.add_argument("--validation-method", required=True)
+    issue.add_argument("--validation-expected", required=True)
+    issue.add_argument("--evidence", type=Path, action="append", default=[])
+    issue.add_argument("--model")
+    issue.add_argument("--channel")
+
+    learning_validation = subparsers.add_parser(
+        "validate-learning", help="回写 V02 验证结果并在通过后自动升级正式规则"
+    )
+    learning_validation.add_argument("--knowledge-dir", type=Path, required=True)
+    learning_validation.add_argument("--batch", type=Path, required=True)
+    learning_validation.add_argument("--video-id", required=True)
+    learning_validation.add_argument("--issue-id", required=True)
+    learning_validation.add_argument(
+        "--result", choices=("passed", "failed", "inconclusive"), required=True
+    )
+    learning_validation.add_argument("--candidate", type=Path)
+
+    node_rules = subparsers.add_parser(
+        "prepare-node-rules", help="为当前节点加载正式规避规则并记录命中"
+    )
+    node_rules.add_argument("--knowledge-dir", type=Path, required=True)
+    node_rules.add_argument("--batch", type=Path, required=True)
+    node_rules.add_argument("--video-id", required=True)
+    node_rules.add_argument("--node", choices=sorted(LEARNING_NODES), required=True)
+    node_rules.add_argument("--model")
+    node_rules.add_argument("--channel")
+
+    rerun = subparsers.add_parser("start-rerun", help="把失败任务切换为唯一一次 V02 重跑")
+    rerun.add_argument("--batch", type=Path, required=True)
+    rerun.add_argument("--video-id", required=True)
 
     organize = subparsers.add_parser("organize", help="安全整理单条任务目录的工作文件")
     organize_target = organize.add_mutually_exclusive_group(required=True)
@@ -1240,6 +1902,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_budget_yuan=args.max_budget,
                 cover_reference_dir=args.cover_reference_dir,
                 knowledge_dir=args.knowledge_dir,
+                image_provider=args.image_provider,
+                image_api_config=(
+                    json.loads(args.image_api_config.read_text(encoding="utf-8"))
+                    if args.image_api_config is not None
+                    else None
+                ),
             )
             print(context.batch_dir)
         elif args.command == "validate-content":
@@ -1260,6 +1928,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "record-review":
             record_review(args.batch, args.result, args.knowledge_dir)
             print("验收结果已回写，失败项已进入候选经验")
+        elif args.command == "record-issue":
+            print(
+                capture_learning_issue(
+                    knowledge_dir=args.knowledge_dir,
+                    batch_dir=args.batch,
+                    video_id=args.video_id,
+                    node=args.node,
+                    user_feedback=args.feedback,
+                    symptom=args.symptom,
+                    root_cause=args.root_cause,
+                    solution=args.solution,
+                    prevention_rule=args.prevention_rule,
+                    validation_method=args.validation_method,
+                    validation_expected=args.validation_expected,
+                    evidence_paths=tuple(args.evidence),
+                    model=args.model,
+                    channel=args.channel,
+                ).resolve()
+            )
+        elif args.command == "validate-learning":
+            if args.result == "passed" and args.candidate is None:
+                raise ValueError("验证通过必须提供 --candidate")
+            result = validate_learning_issue(
+                knowledge_dir=args.knowledge_dir,
+                batch_dir=args.batch,
+                video_id=args.video_id,
+                issue_id=args.issue_id,
+                result=args.result,
+                verified_candidate=args.candidate,
+            )
+            print(result.resolve() if result is not None else "未升级正式规则")
+        elif args.command == "prepare-node-rules":
+            print(
+                prepare_node_rules(
+                    knowledge_dir=args.knowledge_dir,
+                    batch_dir=args.batch,
+                    video_id=args.video_id,
+                    node=args.node,
+                    model=args.model,
+                    channel=args.channel,
+                ).resolve()
+            )
+        elif args.command == "start-rerun":
+            print(start_rerun(args.batch, args.video_id).resolve())
         elif args.command == "organize":
             result = (
                 organize_item_dir(args.item_dir, dry_run=args.dry_run)
