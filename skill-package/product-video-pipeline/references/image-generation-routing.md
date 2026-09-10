@@ -2,13 +2,15 @@
 
 ## 选择和封存
 
-启动回复选择 `GPT 网页端` 或 `第三方 API`，两者批次内锁定，禁止自动切换。已锁定生图渠道在故障时仍不得自动回退到另一渠道。`gpt_web` 只使用当前登录浏览器会话，不使用服务器端 OpenAI API；第三方 API 仅使用封存的 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，不保存密钥值。
+启动回复必须向用户同时提供三个选项：`本机 Codex 界面`、`ChatGPT 网页端`、`第三方 API`。生图渠道必须选择其中一项；三项平级，不设默认渠道，不规定尝试顺序，也不得自动替用户选择。选择后在批次内锁定；已锁定生图渠道故障时不得自动切换到另一渠道。
+
+内部标识分别为 `codex`、`chatgpt_web`、`third_party_api`。前两项只使用当前登录会话，不使用服务器端 OpenAI API；第三方 API 仅使用封存的 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，不保存密钥值。
 
 用户只确认本批次最高总预算。第三方图片成本由运行器在内部 `image_budget_ledger` 结算，受已封存的总预算和图片份额限制；没有独立的用户图片预算。
 
 ## 动作与提交
 
-`next` 返回 `GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，均包含真实参考图绝对路径、提交提示词路径和 `width: 2160`、`height: 3840`、`native_resolution_required: true`。宿主只执行该动作，下载后用：
+`next` 按已选渠道返回 `CODEX_IMAGE_REQUIRED`、`CHATGPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，均包含真实参考图绝对路径、提交提示词路径和 `width: 2160`、`height: 3840`、`native_resolution_required: true`。宿主只执行该动作，下载后用：
 
 ```powershell
 python scripts/pipeline_runner.py accept-image --batch "批次目录" --action-id "动作ID" --source "下载文件"

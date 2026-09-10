@@ -34,7 +34,12 @@ VALID_STATES = {
     "COMPLETED",
     "BLOCKED",
 }
-IMAGE_ACTION_KINDS = {"GPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED"}
+IMAGE_ACTION_KINDS = {
+    "CODEX_IMAGE_REQUIRED",
+    "CHATGPT_WEB_IMAGE_REQUIRED",
+    "GPT_WEB_IMAGE_REQUIRED",
+    "THIRD_PARTY_IMAGE_REQUIRED",
+}
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,32 @@ def _load_policy_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _config_value(name: str) -> Optional[str]:
+    path = Path(__file__).with_name("api_config.py")
+    spec = importlib.util.spec_from_file_location("product_video_api_config_runtime", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 api_config.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return os.environ.get(name) or module.get_config_value(name)
+
+
+def _persistent_image_api_config() -> dict[str, str]:
+    path = Path(__file__).with_name("api_config.py")
+    spec = importlib.util.spec_from_file_location("product_video_api_config_runtime", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 api_config.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.image_api_runtime_config()
+
+
+def _cli_image_provider(value: str) -> str:
+    if value == "gpt_web":
+        return "chatgpt_web"
+    return _load_policy_module().normalize_image_provider(value)
 
 
 def _load_prompt_contract():
@@ -394,7 +425,7 @@ def _submit_item(
         dry_run=dry_run,
         confirm_paid=not dry_run,
         workflow_id=autodl.WORKFLOW_ID,
-        auth_scheme=os.environ.get("AUTODL_AUTH_SCHEME", "bearer"),
+        auth_scheme=_config_value("AUTODL_AUTH_SCHEME") or "bearer",
         response_path=item_dir / "_工作文件/任务状态/AutoDL原始响应.json",
     )
 
@@ -404,7 +435,7 @@ def _poll_item(task_id: str, api_key: Optional[str]) -> dict[str, object]:
     policy = _load_policy_module().load_policy(Path(__file__).resolve().parents[1])
     response = autodl.poll_task(
         task_id, api_key=api_key,
-        auth_scheme=os.environ.get("AUTODL_AUTH_SCHEME", "bearer"),
+        auth_scheme=_config_value("AUTODL_AUTH_SCHEME") or "bearer",
         interval_seconds=policy["autodl"]["poll_interval_seconds"],
         max_wait_seconds=policy["autodl"]["poll_timeout_seconds"],
     )
@@ -478,9 +509,9 @@ def _confirmation_manifest(batch_dir: Path) -> dict[str, object]:
     if run_mode not in {"learning", "auto"}:
         raise PermissionError("启动确认单运行模式无效")
     image_provider = policy_module.normalize_image_provider(confirmation.get("image_provider"))
-    if image_provider == "gpt_web":
+    if image_provider != "third_party_api":
         if confirmation.get("image_api_config") not in (None, {}):
-            raise PermissionError("gpt_web 图片渠道不得携带第三方 API 配置")
+            raise PermissionError("非第三方 API 图片渠道不得携带第三方 API 配置")
         image_api_config = {}
     else:
         image_api_config = policy_module.normalize_image_api_config(
@@ -568,7 +599,7 @@ def _activate_auto_batch(
     manifest = _confirmation_manifest(batch)
     if manifest["image_provider"] == "third_party_api":
         api_key_env = manifest["image_api_config"]["api_key_env"]
-        if not os.environ.get(api_key_env):
+        if not _config_value(api_key_env):
             raise LocalAutoConfigurationRequired(
                 f"缺少图片 API 密钥环境变量：{api_key_env}"
             )
@@ -593,23 +624,28 @@ def _approved_image_config(
     policy_module = _load_policy_module()
     selected = policy_module.normalize_image_provider(provider)
     declared = policy_module.normalize_image_provider(confirmation.get("image_provider"))
+    if declared == "gpt_web" and selected == "chatgpt_web":
+        selected = declared
     if selected != declared:
         raise PermissionError("批准的图片渠道与启动确认单不一致；切换渠道必须新建批次")
-    if selected == "gpt_web":
+    if selected != "third_party_api":
         if config_path is not None or confirmation.get("image_api_config") not in (None, {}):
-            raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+            raise ValueError("非第三方 API 图片渠道不得携带第三方 API 配置")
         return selected, {}
-    if config_path is None or not config_path.is_file():
-        raise ValueError("third_party_api 必须提供 --image-api-config")
-    supplied = policy_module.normalize_image_api_config(
-        json.loads(config_path.read_text(encoding="utf-8"))
-    )
+    if config_path is None:
+        supplied = policy_module.normalize_image_api_config(_persistent_image_api_config())
+    elif config_path.is_file():
+        supplied = policy_module.normalize_image_api_config(
+            json.loads(config_path.read_text(encoding="utf-8"))
+        )
+    else:
+        raise ValueError("--image-api-config 文件不存在")
     declared_config = policy_module.normalize_image_api_config(
         confirmation.get("image_api_config")
     )
     if supplied != declared_config:
         raise PermissionError("图片 API 配置与启动确认单不一致")
-    if not os.environ.get(supplied["api_key_env"]):
+    if not _config_value(supplied["api_key_env"]):
         raise PermissionError(f"缺少图片 API 密钥环境变量：{supplied['api_key_env']}")
     return selected, supplied
 
@@ -811,10 +847,10 @@ def _run_autodl_locked(
             str(info.get("reconciliation_reason") or "存在未核对的提交请求身份"),
         )
     if not task_id:
-        api_key = api_key or os.environ.get("AUTODL_API_KEY")
+        api_key = api_key or _config_value("AUTODL_API_KEY")
         if not api_key:
             raise ValueError("未设置 AUTODL_API_KEY；尚未创建任何付费提交标记")
-        if os.environ.get("AUTODL_AUTH_SCHEME", "bearer") not in {"bearer", "raw"}:
+        if (_config_value("AUTODL_AUTH_SCHEME") or "bearer") not in {"bearer", "raw"}:
             raise ValueError("AUTODL_AUTH_SCHEME 只能是 bearer 或 raw")
         preview = _submit_item(item_dir, api_key, dry_run=True)
         request_hash = str(preview.get("request_hash") or "")
@@ -942,7 +978,7 @@ def accept_generated_image(
     artifact_name: str,
     source: Path,
     *,
-    provider: str = "gpt_web",
+    provider: str = "codex",
 ) -> dict[str, object]:
     if artifact_name not in {"分镜图.png", "尾帧图.png", "封面图.png"}:
         raise ValueError(f"不支持的图片产出：{artifact_name}")
@@ -1099,10 +1135,10 @@ def _reserve_action(batch: Path, state: RunnerState, policy: dict[str, object], 
         raise ValueError("存在未接收的模型动作；必须先恢复或记录该动作失败")
     limits = policy["model_budget"]
     video_id = action.get("video_id")
-    if category == "gpt_web_image":
+    if category in {"codex_image", "chatgpt_web_image", "gpt_web_image"}:
         used = state.image_calls_by_video.get(video_id, 0)
         if used >= limits["image_calls_per_video"]:
-            raise ModelBudgetExceeded(f"{video_id} GPT 网页图片次数已耗尽")
+            raise ModelBudgetExceeded(f"{video_id} 原生图片调用次数已耗尽")
         state.image_calls_by_video[video_id] = used + 1
     elif category == "third_party_api_image":
         raise ValueError("third_party_api 图片动作必须调用 _reserve_image_api_action")
@@ -1240,6 +1276,8 @@ def _reference_paths(batch: Path, item: Path, artifact: str) -> list[str]:
 
 def _image_action_kind(provider: str) -> str:
     return {
+        "codex": "CODEX_IMAGE_REQUIRED",
+        "chatgpt_web": "CHATGPT_WEB_IMAGE_REQUIRED",
         "gpt_web": "GPT_WEB_IMAGE_REQUIRED",
         "third_party_api": "THIRD_PARTY_IMAGE_REQUIRED",
     }[provider]
@@ -1405,9 +1443,9 @@ def next_action(
         image_provider = _load_policy_module().normalize_image_provider(
             state.approved_manifest["image_provider"]
         )
-        if image_provider == "gpt_web":
+        if image_provider != "third_party_api":
             if state.approved_manifest.get("image_api_config") != {}:
-                raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+                raise ValueError("非第三方 API 图片渠道不得携带第三方 API 配置")
         else:
             _load_policy_module().normalize_image_api_config(
                 state.approved_manifest.get("image_api_config")
@@ -1493,7 +1531,7 @@ def next_action(
                     if image_provider == "third_party_api":
                         return _reserve_image_api_action(batch_dir, state, action)
                     return _reserve_action(
-                        batch_dir, state, policy, action, "gpt_web_image"
+                        batch_dir, state, policy, action, f"{image_provider}_image"
                     )
                 except ModelBudgetExceeded as exc:
                     state.item_failures[video_id] = {"kind": "image", "reason": str(exc)}
@@ -2229,7 +2267,8 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--estimated-v01-total", required=True)
     approve.add_argument(
         "--image-provider",
-        choices=("gpt_web", "third_party_api"),
+        type=_cli_image_provider,
+        choices=("codex", "chatgpt_web", "third_party_api"),
         required=True,
     )
     approve.add_argument("--image-api-config", type=Path)

@@ -4,6 +4,8 @@
 
 ```text
 默认新视频工作流 ID：`minimax_h3_lightx2v_v5_15s`
+
+AutoDL 凭据使用 `python scripts/api_config.py configure --category autodl` 永久配置到 Windows 当前用户环境变量。运行器优先读取当前进程环境，缺失时读取当前用户持久环境；状态输出只显示密钥末四位。
 兼容工作流别名：`minimax_h3_lightx2v`
 时长：15 秒；比例：9:16；分辨率：768P 或启动时确认的 2K
 首尾帧：first_frame、last_frame；声音：封闭双角色原生音轨，无 BGM

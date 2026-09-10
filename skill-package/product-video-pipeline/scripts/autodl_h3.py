@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -18,6 +19,18 @@ from typing import Dict, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    from api_config import get_config_value
+except ModuleNotFoundError:
+    _api_config_spec = importlib.util.spec_from_file_location(
+        "product_video_api_config_runtime", Path(__file__).with_name("api_config.py")
+    )
+    if not _api_config_spec or not _api_config_spec.loader:
+        raise
+    _api_config_module = importlib.util.module_from_spec(_api_config_spec)
+    _api_config_spec.loader.exec_module(_api_config_module)
+    get_config_value = _api_config_module.get_config_value
+
 
 COMFYUI_WORKFLOW_BASE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow"
 WORKFLOW_ID = "minimax_h3_lightx2v_v5_15s"
@@ -26,6 +39,10 @@ KNOWN_WORKFLOW_IDS = (
     "minimax_h3_lightx2v",
 )
 QUERY_URL_TEMPLATE = "https://www.autodl.art/api/v1/comfyui/comfyui_workflow/result/{task_id}"
+
+
+def _config_value(name: str) -> Optional[str]:
+    return os.environ.get(name) or get_config_value(name)
 
 
 def extract_task_id(response: Dict[str, object]) -> str:
@@ -130,7 +147,7 @@ def submit_payload(
         return preview
     if not confirm_paid:
         raise PermissionError("这是付费操作；必须显式传入 confirm_paid=True")
-    api_key = api_key or os.environ.get("AUTODL_API_KEY")
+    api_key = api_key or _config_value("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
     response = _json_request("POST", submit_url, api_key, auth_scheme, api_payload, timeout)
@@ -152,7 +169,7 @@ def query_task(
     auth_scheme: str = "bearer",
     timeout: int = 60,
 ) -> Dict[str, object]:
-    api_key = api_key or os.environ.get("AUTODL_API_KEY")
+    api_key = api_key or _config_value("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
     return _json_request(
@@ -257,7 +274,7 @@ def _write_json(path: Path, value: object) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoDL.Art MiniMax-H3 ComfyUI 工作流便携客户端")
-    parser.add_argument("--auth-scheme", choices=("bearer", "raw"), default=os.environ.get("AUTODL_AUTH_SCHEME", "bearer"))
+    parser.add_argument("--auth-scheme", choices=("bearer", "raw"), default=_config_value("AUTODL_AUTH_SCHEME") or "bearer")
     sub = parser.add_subparsers(dest="command", required=True)
 
     submit = sub.add_parser("submit")

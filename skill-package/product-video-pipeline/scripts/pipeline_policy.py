@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-IMAGE_PROVIDERS = ("gpt_web", "third_party_api")
+IMAGE_PROVIDERS = ("codex", "chatgpt_web", "third_party_api")
 IMAGE_API_FIELDS = (
     "api_name", "base_url", "model", "api_key_env",
     "unit_price_yuan",
@@ -39,8 +39,10 @@ def positive_amount(value: object, field: str) -> Decimal:
 
 
 def normalize_image_provider(value: object) -> str:
+    if value == "gpt_web":
+        return "gpt_web"
     if not isinstance(value, str) or value not in IMAGE_PROVIDERS:
-        raise ValueError("图片渠道必须明确选择 gpt_web 或 third_party_api")
+        raise ValueError("图片渠道必须明确选择 codex、chatgpt_web 或 third_party_api")
     return value
 
 

@@ -163,9 +163,11 @@ def test_skill_package_contains_required_portable_resources():
         "references/review-learning.md",
         "references/install.md",
         "references/image-generation-routing.md",
+        "references/api-configuration.md",
         "references/automatic-learning-rules.md",
         "requirements.txt",
         "scripts/workflow_cli.py",
+        "scripts/api_config.py",
         "scripts/autodl_h3.py",
         "scripts/render_cover.py",
         "scripts/self_test.py",
@@ -200,10 +202,11 @@ def test_image_generation_routing_requires_a_locked_provider_and_is_review_free(
         assert phrase in combined
     assert "不进行人工图片审核" in combined
     assert "不进行模型视觉审核" in combined
-    assert "GPT_WEB_IMAGE_REQUIRED" in combined
+    assert "CODEX_IMAGE_REQUIRED" in combined
+    assert "CHATGPT_WEB_IMAGE_REQUIRED" in combined
     assert "THIRD_PARTY_IMAGE_REQUIRED" in combined
     assert "gpt_web" in combined and "OpenAI API" in combined
-    assert "Codex 原生生图" not in combined
+    assert "本机 Codex 界面" in combined
     assert "pipeline_runner.py accept-image" in combined
     for field in (
         "api_name",
@@ -326,7 +329,7 @@ def test_operator_docs_keep_locked_provider_rules_separate_from_gpt_web_details(
 
     for document in (skill, routing, workflow, delivery):
         assert "已锁定生图渠道" in document
-    assert "gpt_web_image" in skill
+    assert "原生生图动作" in skill
     assert "image_budget_ledger" in skill
     assert "GPT 网页端" in routing and "THIRD_PARTY_IMAGE_REQUIRED" in routing
 
@@ -337,7 +340,7 @@ def test_operator_docs_show_required_image_provider_and_failure_settlement_contr
         encoding="utf-8"
     )
 
-    assert "--image-provider gpt_web" in skill
+    assert "--image-provider <codex|chatgpt_web|third_party_api>" in skill
     assert "--image-provider third_party_api --image-api-config <非敏感JSON路径>" in skill
     assert "image-failed --submission-state not_sent|sent|unknown" in routing
     assert "默认 `unknown`" in routing
@@ -355,7 +358,7 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
 
 
 def test_current_source_is_v1_7_with_low_cost_runtime_files():
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.1"
     for relative in (
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
@@ -404,7 +407,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
 
 
 def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.7.0.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.1.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -415,7 +418,7 @@ def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
             "product-video-pipeline/scripts/pipeline_runner.py",
         }
         assert required <= names
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.7.0"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.1"
         assert not any(
             name.endswith(".env")
             or name.endswith(".pyc")
@@ -444,7 +447,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "真实存在的绝对路径" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.1"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -458,11 +461,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "WAITING_USER_FEEDBACK" in skill
     assert "V02" in review
     assert "产品参考图是唯一产品依据" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.7.0"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.1"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.5.0.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.1.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -471,14 +474,15 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "product-video-pipeline/scripts/autodl_h3.py" in names
         assert "product-video-pipeline/references/autodl-h3.md" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.5.0"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.1"
+        autodl = bundle.read("product-video-pipeline/references/autodl-h3.md").decode("utf-8")
+        assert "first_frame" in autodl and "last_frame" in autodl
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
-        assert "first_frame" in skill and "last_frame" in skill
-        assert "所有新视频固定使用 `minimax_h3_lightx2v`" in skill
+        assert "所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`" in skill
 
 
 def test_v1_6_release_contains_seven_root_deliverables():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.6.0.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.1.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -486,7 +490,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
         assert "product-video-pipeline/VERSION" in names
         assert "product-video-pipeline/scripts/workflow_cli.py" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.6.0"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.1"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         for artifact in (
             "标题.txt",
@@ -495,13 +499,13 @@ def test_v1_6_release_contains_seven_root_deliverables():
             "分镜图.png",
             "尾帧图.png",
             "封面图.png",
-            "视频.mp4",
         ):
             assert artifact in skill
+        assert "按发布标题清洗命名的 `.mp4`" in skill
 
 
 def test_v1_6_1_release_contains_startup_communication_contract():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.6.1.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.1.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -512,7 +516,7 @@ def test_v1_6_1_release_contains_startup_communication_contract():
             name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
             for name in names
         )
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.6.1"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.1"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         startup = bundle.read(
             "product-video-pipeline/references/startup-checklist.md"
@@ -2006,7 +2010,7 @@ def test_compact_pipeline_policy_is_versioned_with_allowed_image_providers():
     policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
     assert policy["version"] == 1
     assert policy["image"] == {
-        "allowed_providers": ["gpt_web", "third_party_api"],
+        "allowed_providers": ["codex", "chatgpt_web", "third_party_api"],
         "human_review": False,
         "model_visual_review": False,
         "target_width": 2160,
@@ -2091,12 +2095,12 @@ def test_native_4k_web_image_is_auto_promoted_without_resampling(tmp_path):
     raw = tmp_path / "gpt-result.png"
     Image.new("RGB", (2160, 3840), "navy").save(raw)
 
-    result = runner.accept_generated_image(item, "分镜图.png", raw)
+    result = runner.accept_generated_image(item, "分镜图.png", raw, provider="codex")
 
     promoted = item / "分镜图.png"
     assert result["ok"] is True
     assert result["review"] == "skipped_by_policy"
-    assert result["provider"] == "gpt_web"
+    assert result["provider"] == "codex"
     assert Image.open(promoted).size == (2160, 3840)
     events = json.loads(
         (item / "_工作文件" / "验收记录" / "产出验收记录.json").read_text(encoding="utf-8")

@@ -32,10 +32,12 @@ def main() -> int:
         "references/delivery-contract.md",
         "references/automatic-learning-rules.md",
         "references/image-generation-routing.md",
+        "references/api-configuration.md",
         "references/install.md",
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
         "scripts/pipeline_runner.py",
+        "scripts/api_config.py",
         "scripts/workflow_cli.py",
         "scripts/autodl_h3.py",
         "scripts/render_cover.py",
@@ -44,6 +46,69 @@ def main() -> int:
     if missing:
         print("缺少文件：" + ", ".join(missing), file=sys.stderr)
         return 1
+    api_config_spec = importlib.util.spec_from_file_location(
+        "product_video_api_config", SKILL_ROOT / "scripts" / "api_config.py"
+    )
+    assert api_config_spec and api_config_spec.loader
+    api_config = importlib.util.module_from_spec(api_config_spec)
+    api_config_spec.loader.exec_module(api_config)
+    assert api_config.mask_secret("12345678") == "****5678"
+    assert api_config.mask_secret("") == "未配置"
+    assert set(api_config.CONFIG_SCHEMAS) == {"autodl", "image", "text"}
+    memory_store = api_config.MemoryStore(
+        {"AUTODL_API_KEY": "old-key", "PRODUCT_VIDEO_IMAGE_API_KEY": "image-sentinel"}
+    )
+    api_config.save_category(
+        "autodl",
+        {"AUTODL_API_KEY": "new-key", "AUTODL_AUTH_SCHEME": "bearer"},
+        memory_store,
+    )
+    assert memory_store.get("AUTODL_API_KEY") == "new-key"
+    assert memory_store.get("PRODUCT_VIDEO_IMAGE_API_KEY") == "image-sentinel"
+    image_store = api_config.MemoryStore(
+        {
+            "PRODUCT_VIDEO_IMAGE_API_PROVIDER": "Example Images",
+            "PRODUCT_VIDEO_IMAGE_API_BASE_URL": "https://images.example.test/v1",
+            "PRODUCT_VIDEO_IMAGE_API_MODEL": "image-v1",
+            "PRODUCT_VIDEO_IMAGE_API_KEY": "secret",
+            "PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN": "0.20",
+        }
+    )
+    assert api_config.image_api_runtime_config(image_store) == {
+        "api_name": "Example Images",
+        "base_url": "https://images.example.test/v1",
+        "model": "image-v1",
+        "api_key_env": "PRODUCT_VIDEO_IMAGE_API_KEY",
+        "unit_price_yuan": "0.20",
+    }
+    try:
+        api_config.validate_category_values(
+            "image",
+            {
+                "PRODUCT_VIDEO_IMAGE_API_PROVIDER": "bad",
+                "PRODUCT_VIDEO_IMAGE_API_BASE_URL": "https://user:secret@example.test/v1",
+                "PRODUCT_VIDEO_IMAGE_API_MODEL": "image-v1",
+                "PRODUCT_VIDEO_IMAGE_API_KEY": "secret",
+                "PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN": "0.20",
+            },
+        )
+        raise AssertionError("含内嵌凭据的 URL 应被拒绝")
+    except api_config.ConfigurationInputError:
+        pass
+    unsafe_status = api_config.format_status(
+        api_config.status_payload(
+            api_config.MemoryStore(
+                {
+                    "PRODUCT_VIDEO_IMAGE_API_PROVIDER": "bad",
+                    "PRODUCT_VIDEO_IMAGE_API_BASE_URL": "https://user:url-canary@example.test/v1",
+                    "PRODUCT_VIDEO_IMAGE_API_MODEL": "image-v1",
+                    "PRODUCT_VIDEO_IMAGE_API_KEY": "secret",
+                    "PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN": "0.20",
+                }
+            )
+        )
+    )
+    assert "url-canary" not in unsafe_status
     child_environment = dict(os.environ)
     child_environment["PYTHONUTF8"] = "1"
     workflow_script = SKILL_ROOT / "scripts" / "workflow_cli.py"
@@ -364,7 +429,7 @@ def main() -> int:
         "SKILL.md": ("首次回复同时授权 V01", "原生2160×3840", "WAITING_USER_FEEDBACK", "真实存在的绝对路径"),
         "references/startup-checklist.md": ("你需要提供的内容", "本次配置明细", "请你回复", "本批次最高总预算", "首次回复同时授权 V01", "api_key_env"),
         "references/content-contract.md": ("产品参考图是唯一产品依据", "禁止用文字重新描述产品外观", "非当前说话者嘴巴闭合且完全不发声", "清单之外零人声"),
-        "references/image-generation-routing.md": ("GPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED", "原生2160×3840", "禁止本地放大"),
+        "references/image-generation-routing.md": ("CODEX_IMAGE_REQUIRED", "CHATGPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED", "原生2160×3840", "禁止本地放大"),
         "references/workflow.md": ("first_frame", "last_frame", "固定中远景", "V01_DELIVERED", "WAITING_USER_FEEDBACK"),
         "references/autodl-h3.md": ("first_frame", "last_frame", "minimax_h3_lightx2v_v5_15s", "清单之外零人声"),
         "references/delivery-contract.md": ("真实存在的绝对路径", "V01 已下载，等待用户反馈", "WAITING_USER_FEEDBACK"),
@@ -401,7 +466,7 @@ def main() -> int:
     runner = importlib.util.module_from_spec(runner_spec)
     runner_spec.loader.exec_module(runner)
     policy = json.loads((SKILL_ROOT / "pipeline_policy.json").read_text(encoding="utf-8"))
-    assert policy["image"]["allowed_providers"] == ["gpt_web", "third_party_api"]
+    assert policy["image"]["allowed_providers"] == ["codex", "chatgpt_web", "third_party_api"]
     assert policy["image"]["human_review"] is False
     assert policy["image"]["model_visual_review"] is False
 
@@ -476,7 +541,8 @@ def main() -> int:
                 else:
                     os.environ["SELF_TEST_IMAGE_API_KEY"] = previous_key
 
-    assert approved_image_action("gpt_web")["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+    assert approved_image_action("codex")["kind"] == "CODEX_IMAGE_REQUIRED"
+    assert approved_image_action("chatgpt_web")["kind"] == "CHATGPT_WEB_IMAGE_REQUIRED"
     assert approved_image_action("third_party_api")["kind"] == "THIRD_PARTY_IMAGE_REQUIRED"
     with tempfile.TemporaryDirectory() as runtime_temporary:
         batch = Path(runtime_temporary) / "batch"
@@ -485,21 +551,21 @@ def main() -> int:
         task_dir.mkdir(parents=True)
         product = Path(runtime_temporary) / "产品参考.png"
         Image.new("RGB", (64, 64), "navy").save(product)
-        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "gpt_web", "image_api_config": {}, "product_images": [str(product)]}), encoding="utf-8")
+        (batch / "启动确认单.json").write_text(json.dumps({"total_videos": 1, "resolution": "2K", "duration_seconds": 15, "max_budget_yuan": "10", "unit_price_yuan": "3", "image_provider": "codex", "image_api_config": {}, "product_images": [str(product)]}), encoding="utf-8")
         (task_dir / "任务信息.json").write_text(json.dumps({"video_id": "V001", "retry_count": 0}), encoding="utf-8")
         def invoke(*args):
             output = io.StringIO()
             with redirect_stdout(output):
                 assert runner.main(list(args)) == 0
             return json.loads(output.getvalue())
-        action = invoke("approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "3", "--image-provider", "gpt_web")
+        action = invoke("approve-start", "--batch", str(batch), "--approved-budget", "10", "--estimated-v01-total", "3", "--image-provider", "codex")
         assert action["kind"] == "BATCH_CONTENT_REQUIRED" and action["action_id"]
         content_dir = Path(action["output_dir"])
         (content_dir / "V001.json").write_text(json.dumps(valid_content, ensure_ascii=False), encoding="utf-8")
         invoke("accept-content", "--batch", str(batch), "--action-id", action["action_id"], "--content-dir", str(content_dir), "--profile", str(SKILL_ROOT / "profiles/爱优护电动轮椅_淘宝天猫光合.json"))
         for color in ("blue", "green", "orange"):
             action = invoke("next", "--batch", str(batch))
-            assert action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+            assert action["kind"] == "CODEX_IMAGE_REQUIRED"
             Image.new("RGB", (2160, 3840), color).save(action["output_path"])
             invoke("accept-image", "--batch", str(batch), "--video-id", "V001", "--artifact", action["artifact"], "--source", action["output_path"], "--action-id", action["action_id"])
         assert invoke("next", "--batch", str(batch))["kind"] == "LOCAL_WORK_REQUIRED"
@@ -538,7 +604,7 @@ def main() -> int:
                     "duration_seconds": 15,
                     "max_budget_yuan": "5.00",
                     "prices_by_video": {"V001": "3.00"},
-                    "image_provider": "gpt_web",
+                    "image_provider": "codex",
                     "image_api_config": {},
                     "product_images": [str(product)],
                 },
@@ -573,7 +639,7 @@ def main() -> int:
             )
             for index, color in enumerate(("navy", "green", "orange")):
                 image_action = auto_invoke("next", "--batch", str(batch))
-                assert image_action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+                assert image_action["kind"] == "CODEX_IMAGE_REQUIRED"
                 image = Path(image_action["output_path"])
                 Image.new("RGB", (2160, 3840), color).save(image)
                 auto_invoke(
@@ -632,7 +698,7 @@ def main() -> int:
                     "run_mode": "learning", "total_videos": 1,
                     "resolution": "768P", "duration_seconds": 15,
                     "max_budget_yuan": "10.00", "unit_price_yuan": "3.00",
-                    "image_provider": "gpt_web", "image_api_config": {},
+                    "image_provider": "codex", "image_api_config": {},
                     "product_images": [str(product)],
                 },
                 ensure_ascii=False,
@@ -653,7 +719,7 @@ def main() -> int:
 
             content_action = learning_invoke(
                 "approve-start", "--batch", str(batch), "--approved-budget", "10.00",
-                "--estimated-v01-total", "3.00", "--image-provider", "gpt_web",
+                "--estimated-v01-total", "3.00", "--image-provider", "codex",
             )
             assert content_action["kind"] == "BATCH_CONTENT_REQUIRED"
             content_dir = Path(content_action["output_dir"])
@@ -670,7 +736,7 @@ def main() -> int:
             assert accepted["ok"] is True
             for color in ("purple", "teal", "gold"):
                 image_action = learning_invoke("next", "--batch", str(batch))
-                assert image_action["kind"] == "GPT_WEB_IMAGE_REQUIRED"
+                assert image_action["kind"] == "CODEX_IMAGE_REQUIRED"
                 image = Path(image_action["output_path"])
                 Image.new("RGB", (2160, 3840), color).save(image)
                 learning_invoke(

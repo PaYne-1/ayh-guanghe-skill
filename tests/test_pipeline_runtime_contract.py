@@ -410,12 +410,19 @@ def test_video_validation_requires_full_decode(tmp_path, monkeypatch):
 def test_auth_preflight_and_raw_scheme(setup_batch, monkeypatch):
     runner, policy, batch, items, state = setup_batch
     monkeypatch.delenv("AUTODL_API_KEY", raising=False)
+    original_config_value = runner._config_value
+    monkeypatch.setattr(runner, "_config_value", lambda name: None)
     state.status = "RUNNING_AUTOMATICALLY"
     monkeypatch.setattr(runner, "_submit_item", lambda *a, **k: {"request_hash": "h"})
     with pytest.raises((ValueError, PermissionError), match="AUTODL_API_KEY"):
         runner.run_autodl_item(batch, items[0], state)
     assert not runner._task_info(items[0]).get("submission_pending")
     monkeypatch.setenv("AUTODL_AUTH_SCHEME", "raw")
+    monkeypatch.setattr(
+        runner,
+        "_config_value",
+        lambda name: "raw" if name == "AUTODL_AUTH_SCHEME" else original_config_value(name),
+    )
     fake = module("autodl_h3")
     seen = []
     monkeypatch.setattr(fake, "poll_task", lambda *a, **k: seen.append(k) or {"status": "poll_timeout"})
@@ -721,7 +728,7 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.7.0.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.1.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}

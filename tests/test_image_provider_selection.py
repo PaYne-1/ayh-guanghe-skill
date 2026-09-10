@@ -27,10 +27,15 @@ def test_image_provider_is_required_and_closed_to_unknown_values(value):
         policy.normalize_image_provider(value)
 
 
-@pytest.mark.parametrize("provider", ["gpt_web", "third_party_api"])
-def test_policy_accepts_exactly_two_image_providers(provider):
+@pytest.mark.parametrize("provider", ["codex", "chatgpt_web", "third_party_api"])
+def test_policy_accepts_exactly_three_image_providers(provider):
     policy = load_script("pipeline_policy.py")
     assert policy.normalize_image_provider(provider) == provider
+
+
+def test_policy_keeps_legacy_gpt_web_batches_loadable():
+    policy = load_script("pipeline_policy.py")
+    assert policy.normalize_image_provider("gpt_web") == "gpt_web"
 
 
 def test_third_party_config_requires_non_secret_fields():

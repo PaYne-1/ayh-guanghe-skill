@@ -121,6 +121,22 @@ def _load_policy_module():
     return module
 
 
+def _load_api_config_module():
+    path = Path(__file__).with_name("api_config.py")
+    spec = importlib.util.spec_from_file_location("product_video_api_config_runtime", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载 api_config.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cli_image_provider(value: str) -> str:
+    if value == "gpt_web":
+        return "chatgpt_web"
+    return _load_policy_module().normalize_image_provider(value)
+
+
 class BatchItem:
     def __init__(self, video_id: str, selling_point: str, project_dir: Path):
         self.video_id = video_id
@@ -1216,9 +1232,11 @@ def initialize_batch(
     policy_module = _load_policy_module()
     image_provider = policy_module.normalize_image_provider(image_provider)
     if image_provider == "third_party_api":
+        if image_api_config is None:
+            image_api_config = _load_api_config_module().image_api_runtime_config()
         normalized_image_api = policy_module.normalize_image_api_config(image_api_config)
     elif image_api_config not in (None, {}):
-        raise ValueError("gpt_web 图片渠道不得携带第三方 API 配置")
+        raise ValueError("非第三方 API 图片渠道不得携带第三方 API 配置")
     else:
         normalized_image_api = {}
     try:
@@ -1800,7 +1818,13 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--max-budget", required=True)
     init.add_argument("--cover-reference-dir", type=Path, required=True)
     init.add_argument("--knowledge-dir", type=Path, default=Path(__file__).resolve().parents[1] / "data")
-    init.add_argument("--image-provider", choices=("gpt_web", "third_party_api"), required=True)
+    init.add_argument(
+        "--image-provider",
+        type=_cli_image_provider,
+        choices=("codex", "chatgpt_web", "third_party_api"),
+        required=True,
+        help="用户明确选择的单一生图渠道；无默认值",
+    )
     init.add_argument("--image-api-config", type=Path)
 
     validate = subparsers.add_parser("validate-content", help="校验并保存一条结构化策划内容")

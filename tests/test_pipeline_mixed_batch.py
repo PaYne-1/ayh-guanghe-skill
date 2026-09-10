@@ -95,8 +95,10 @@ def test_repaired_environment_resumes_same_attempt_without_terminal_block(setup_
     posts = provider(env, monkeypatch)
     attribute = {"payload": "prepare_payload", "network": "_poll_item", "download": "_download_item", "decode": "validate_video_file"}.get(stage)
     original = getattr(runner, attribute) if attribute else None
+    original_config_value = runner._config_value
     if stage == "preflight":
         monkeypatch.delenv("AUTODL_API_KEY")
+        monkeypatch.setattr(runner, "_config_value", lambda name: None)
     else:
         def broken(*a, **k):
             raise OSError("repairable offline environment failure")
@@ -109,6 +111,7 @@ def test_repaired_environment_resumes_same_attempt_without_terminal_block(setup_
     if attribute:
         monkeypatch.setattr(runner, attribute, original)
     else:
+        monkeypatch.setattr(runner, "_config_value", original_config_value)
         monkeypatch.setenv("AUTODL_API_KEY", "offline")
     assert command(env, capsys, "run-local")["kind"] == "USER_FINAL_REVIEW_REQUIRED"
     assert posts == ["V001:V01", "V002:V01"]

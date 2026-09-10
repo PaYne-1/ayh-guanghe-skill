@@ -1,6 +1,6 @@
 ---
 name: product-video-pipeline
-description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
+description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, says 配置api to manage persistent API settings, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
 ---
 
 # 产品短视频流水线
@@ -9,7 +9,9 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 ## 触发与首次回复
 
-仅在明确触发词或 `$product-video-pipeline` 出现时，每次任务的第一步读取并完整展示 [启动确认单](references/startup-checklist.md) 的 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。普通“继续”只继续当前任务；换产品或新批次只先问一次是否开始全新任务。
+仅在明确产品视频触发词或 `$product-video-pipeline` 出现时，每次任务的第一步读取并完整展示 [启动确认单](references/startup-checklist.md) 的 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。普通“继续”只继续当前任务；换产品或新批次只先问一次是否开始全新任务。
+
+用户明确说 `配置api` 时，只进入 [API 永久配置向导](references/api-configuration.md)：先显示 AutoDL、生图、文本三类 API 的遮罩状态，再配置用户指定类别。不得触发产品视频启动清单、扫描目录、创建批次、dry-run 或任何付费调用。密钥只允许在交互式终端隐藏输入，并永久保存到 Windows 当前用户环境变量。
 
 首次回复是唯一的配置与授权交互：自动生产模式的**首次回复同时授权 V01**。先在本地验证价格、预算、渠道与安全环境；只有硬阻断才返回用户。不得要求 `approve-start`、第二次自动启动确认、单独图片预算、图片审核或 V01 语义审核。第三方图片 API 只确认 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，只记录环境变量名，绝不索取密钥。
 
@@ -31,18 +33,18 @@ python scripts/workflow_cli.py init `
   --product-dir "用户产品文件夹" `
   --product-name "产品名称" `
   --selling-point "卖点一" --total 1 --mode auto --resolution 768P `
-  --max-budget 20 --image-provider gpt_web
+  --max-budget 20 --image-provider <codex|chatgpt_web|third_party_api>
 ```
 
-第三方 API 使用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`。已锁定生图渠道不可替换。初始化后按以下循环执行，始终只执行返回的一个外部动作：
+生图渠道必须由用户从 `codex`、`chatgpt_web`、`third_party_api` 三项中明确选择；不设默认值，也没有固定尝试顺序。第三方 API 使用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`。已锁定生图渠道不可替换。初始化后按以下循环执行，始终只执行返回的一个外部动作：
 
 1. 自动模式首次回复后填写本地价格配置，调用 `pipeline_runner.py next`；学习确认模式才调用 `approve-start`。
-2. `BATCH_CONTENT_REQUIRED` 写入内容 JSON 后 `accept-content`；`GPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED` 用 `accept-image` 回传下载文件。渠道批次内锁定，禁止自动切换；图片不进行人工图片审核或模型视觉审核。
+2. `BATCH_CONTENT_REQUIRED` 写入内容 JSON 后 `accept-content`；`CODEX_IMAGE_REQUIRED`、`CHATGPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED` 用 `accept-image` 回传下载文件。渠道批次内锁定，禁止自动切换；图片不进行人工图片审核或模型视觉审核。
 3. `LOCAL_WORK_REQUIRED`/`VIDEO_POLL_PENDING` 使用 `run-local`。`run-local --dry-run` 返回 `DRY_RUN_COMPLETE`，不联网、不扣费、不推进状态。
 4. 自动 V01 的确定性技术检查通过后自动晋升并交付 `V01_DELIVERED`，状态为 `WAITING_USER_FEEDBACK`。返回的 `video_path` 和 `item_dir` 必须是**真实存在的绝对路径**，并附 SHA-256、技术证据和成本。不得自动判断 V01 语义好坏。
 5. 仅在用户反馈后才使用 `request-rerun --batch PATH --video-id ID --reason TEXT` 记录问题。该命令不付费；随后必须对 V02 显式批准单视频费用，才可 `approve-rerun`。V02 进入学习式人工验收，绝不自动 V03。
 
-不得把完整日志粘贴回模型上下文，只读取紧凑 JSON。API 失效、余额不足、总预算不足、缺少安全配置或本地技术失败是硬阻断；其他项目可继续。`gpt_web_image` 动作与 `image_budget_ledger` 是内部台账分类。学习模式的 `review-output` 和 `audit-outputs` 仍绑定明确通过与 SHA-256；自动 V01 不使用这两个审核关卡。
+不得把完整日志粘贴回模型上下文，只读取紧凑 JSON。API 失效、余额不足、总预算不足、缺少安全配置或本地技术失败是硬阻断；其他项目可继续。原生生图动作与 `image_budget_ledger` 是内部台账分类。学习模式的 `review-output` 和 `audit-outputs` 仍绑定明确通过与 SHA-256；自动 V01 不使用这两个审核关卡。
 
 ## 产出与路径
 
