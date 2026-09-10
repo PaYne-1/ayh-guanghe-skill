@@ -728,7 +728,7 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.1.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.2.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}
