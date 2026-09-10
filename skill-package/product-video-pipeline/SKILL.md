@@ -1,6 +1,6 @@
 ---
 name: product-video-pipeline
-description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, says 配置api (Latin API suffix is case-insensitive: 配置api、配置API、配置Api、配置aPi) to manage persistent API settings, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
+description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, says 配置api (Latin API suffix is case-insensitive, including 配置api、配置API、配置Api、配置aPi) to manage persistent API settings, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
 ---
 
 # 产品短视频流水线

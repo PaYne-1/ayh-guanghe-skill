@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from PIL import Image
 
 
@@ -102,6 +103,14 @@ def offline_video_result(runner, item, task_id="offline-task"):
     technical = {"ok": True, "full_decode": True, "sha256": runner._sha256(candidate), "task_id": task_id, "version": f"V{runner._item_retry_count(item) + 1:02d}", "candidate": str(candidate.resolve())}
     runner._persist_video_evidence(item, technical)
     return {"ok": True, "task_id": task_id, "candidate": str(candidate), "technical": technical}
+
+
+def test_skill_frontmatter_is_valid_yaml():
+    text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    metadata = yaml.safe_load(text.split("---", 2)[1])
+    assert metadata["name"] == "product-video-pipeline"
+    assert isinstance(metadata["description"], str)
+    assert "配置api" in metadata["description"]
 
 
 def test_skill_entrypoint_is_cross_agent_and_has_no_stale_workflow():
