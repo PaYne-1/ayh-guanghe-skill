@@ -74,7 +74,7 @@ AUTODL_AUTH_SCHEME=bearer 或 raw
 
 DeepSeek 文本接口的 base_url、模型及密钥通过安全环境配置接入。生图渠道在每个批次启动时必须由用户从 `本机 Codex 界面`、`ChatGPT 网页端`、`第三方 API` 三项中明确选择；三项平级，不设默认值或固定顺序。前两项使用当前已登录会话，且禁止服务器端 OpenAI API 调用；`第三方 API` 使用启动确认单中封存的五项连接/计价字段：`api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`。用户只确认一个**本批次最高总预算**，运行器在内部拆分 V01 视频与图片台账；不要求也不接受独立图片批次预算。为第三方渠道设置的只是 `api_key_env` 指定的环境变量，例如在安全环境中设置该变量；绝不把真实凭据写入启动 JSON、配置文件、命令行、日志或聊天内容。渠道批准后批次内锁定，禁止自动切换。
 
-需要永久配置或更换凭据时说 `配置api`，然后使用 `python scripts/api_config.py status` 查看遮罩状态，并通过 `python scripts/api_config.py configure --category autodl|image|text` 在交互式终端隐藏输入。配置保存到 Windows 当前用户环境变量；详见 [API 永久配置向导](api-configuration.md)。
+需要永久配置或更换凭据时说 `配置api`（Latin `api` 后缀不区分大小写），主机必须先运行 `python scripts/api_config.py prompt` 并原样展示其遮罩状态和唯一类别行；命令读取失败时停止，不得推断为“未配置”。随后通过 `python scripts/api_config.py configure --category autodl|image|text` 在交互式终端隐藏输入。配置保存到 Windows 当前用户环境变量；详见 [API 永久配置向导](api-configuration.md)。
 
 ## 权限与安全说明
 

@@ -440,6 +440,52 @@ def main() -> int:
         content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
         for phrase in phrases:
             assert phrase in content, f"{relative_path} 缺少统一首尾帧规则：{phrase}"
+
+    api_routing_documents = ("SKILL.md", "references/api-configuration.md")
+    valid_api_categories = (
+        "AutoDL.Art 视频 API",
+        "第三方生图 API",
+        "第三方文本生成 API",
+    )
+    exact_api_category_line = "AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API"
+    forbidden_screenshot_phrases = (
+        "Recommended",
+        "GPT Image API",
+        "配置 MiniMax API",
+    )
+    forbidden_example_start = "<!-- forbidden-api-screenshot-examples:start -->"
+    forbidden_example_end = "<!-- forbidden-api-screenshot-examples:end -->"
+
+    def outside_forbidden_examples(content: str) -> str:
+        """Remove an explicitly marked forbidden-example block before checking prose."""
+        before, start, remaining = content.partition(forbidden_example_start)
+        if not start:
+            return content
+        _examples, end, after = remaining.partition(forbidden_example_end)
+        assert end, "禁止示例块必须有结束标记"
+        return before + after
+
+    skill_content = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    for trigger in ("配置api", "配置API", "配置Api", "配置aPi"):
+        assert trigger in skill_content, f"SKILL.md 缺少大小写触发词：{trigger}"
+    assert "不区分大小写" in skill_content
+    assert "python scripts/api_config.py prompt" in skill_content
+    for relative_path in api_routing_documents:
+        content = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
+        for category in valid_api_categories:
+            assert category in content, f"{relative_path} 缺少 API 类别：{category}"
+        assert exact_api_category_line in content, f"{relative_path} 缺少唯一 API 类别行"
+        assert "python scripts/api_config.py prompt" in content, f"{relative_path} 未要求先运行 prompt"
+        assert "无法读取当前配置状态，永久配置未更改" in content, f"{relative_path} 缺少读取失败回复"
+        assert "没有推荐、默认或预选项" in content, f"{relative_path} 未禁止首条回复预选项"
+        visible_content = outside_forbidden_examples(content)
+        for phrase in forbidden_screenshot_phrases:
+            assert phrase not in visible_content, f"{relative_path} 包含错误截图文案：{phrase}"
+
+    install_content = (SKILL_ROOT / "references/install.md").read_text(encoding="utf-8")
+    for phrase in ("不区分大小写", "python scripts/api_config.py prompt", "不得推断为“未配置”"):
+        assert phrase in install_content, f"references/install.md 未同步 API 路由合同：{phrase}"
+
     forbidden_phrases = (
         "每个全新的 Codex 任务窗口中，第一条用户消息无论内容是什么",
         "其他场景继续使用已确认的现有工作流",

@@ -1,6 +1,6 @@
 ---
 name: product-video-pipeline
-description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, says 配置api to manage persistent API settings, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
+description: Use only when the user explicitly says 开始产品视频、制作产品视频、生成产品视频、电动轮椅视频、光合视频任务、继续产品视频任务, says 配置api (Latin API suffix is case-insensitive: 配置api、配置API、配置Api、配置aPi) to manage persistent API settings, or explicitly invokes product-video-pipeline. Do not use for unrelated first messages or generic words such as 开始、继续、视频、产品。
 ---
 
 # 产品短视频流水线
@@ -11,7 +11,13 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 仅在明确产品视频触发词或 `$product-video-pipeline` 出现时，每次任务的第一步读取并完整展示 [启动确认单](references/startup-checklist.md) 的 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。普通“继续”只继续当前任务；换产品或新批次只先问一次是否开始全新任务。
 
-用户明确说 `配置api` 时，只进入 [API 永久配置向导](references/api-configuration.md)：先显示 AutoDL、生图、文本三类 API 的遮罩状态，再配置用户指定类别。不得触发产品视频启动清单、扫描目录、创建批次、dry-run 或任何付费调用。密钥只允许在交互式终端隐藏输入，并永久保存到 Windows 当前用户环境变量。
+用户明确说 `配置api`（Latin `api` 后缀**不区分大小写**，包括 `配置API`、`配置Api`、`配置aPi`）时，只进入 [API 永久配置向导](references/api-configuration.md)。主机必须先执行 `python scripts/api_config.py prompt`，成功后原样展示其遮罩状态和唯一类别行，再询问用户类别；不得自行拼接状态或类别。命令失败时明确回复“无法读取当前配置状态，永久配置未更改”并停止，绝不可推断为“未配置”。首条回复没有推荐、默认或预选项，唯一有效类别行是：
+
+```text
+AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API
+```
+
+不得触发产品视频启动清单、扫描目录、创建批次、dry-run 或任何付费调用。密钥只允许在交互式终端隐藏输入，并永久保存到 Windows 当前用户环境变量。
 
 首次回复是唯一的配置与授权交互：自动生产模式的**首次回复同时授权 V01**。先在本地验证价格、预算、渠道与安全环境；只有硬阻断才返回用户。不得要求 `approve-start`、第二次自动启动确认、单独图片预算、图片审核或 V01 语义审核。第三方图片 API 只确认 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，只记录环境变量名，绝不索取密钥。
 
