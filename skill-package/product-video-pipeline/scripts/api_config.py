@@ -306,6 +306,18 @@ def format_status(payload: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_configuration_prompt(payload: Mapping[str, object]) -> str:
+    status = format_status(payload)
+    return (
+        "当前 API 配置状态：\n\n"
+        f"{status}\n\n"
+        "本机 Codex 和 ChatGPT 网页端使用登录状态，不需要配置 API；"
+        "MiniMax-H3 视频统一通过 AutoDL.Art。\n\n"
+        "请选择本次需要配置或更换的一项：\n"
+        "AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API"
+    )
+
+
 def format_error(exc: Exception) -> str:
     if isinstance(exc, ConfigurationInputError):
         return f"配置失败：{exc}"
@@ -360,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     status = subparsers.add_parser("status", help="显示已遮罩的 API 配置状态")
     status.add_argument("--json", action="store_true", help="输出 JSON 状态")
+    subparsers.add_parser("prompt", help="输出固定 API 配置首轮回复")
     configure = subparsers.add_parser("configure", help="通过隐藏输入配置或更换一个 API")
     configure.add_argument("--category", choices=tuple(CONFIG_SCHEMAS), required=True)
     return parser
@@ -369,6 +382,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     store = WindowsUserEnvironmentStore()
     try:
+        if args.command == "prompt":
+            try:
+                payload = status_payload(store)
+            except Exception:
+                print("无法读取当前配置状态，永久配置未更改", file=sys.stderr)
+                return 1
+            print(format_configuration_prompt(payload))
+            return 0
         if args.command == "status":
             payload = status_payload(store)
             if args.json:
