@@ -1,67 +1,66 @@
 # API 永久配置向导
 
-## 触发边界
+## 触发与输入方式
 
-用户明确说出 `配置api` 时，只进入 API 配置向导；Latin `api` 后缀**不区分大小写**，因此 `配置API`、`配置Api`、`配置aPi` 也同样触发。不得触发产品视频启动清单，不扫描产品目录、不创建批次、不查询媒体价格、不生图、不运行视频 dry-run，也不调用任何付费接口。
+用户说“配置api”（API 大小写不限）或在配置对话中发送连接信息时进入本向导。支持用户直接在聊天中提供密钥、服务商、URL 和模型；不再强制用户操作隐藏输入框，不要求用户复制命令去执行。隐藏输入仅作为用户主动选择的备选方式。
 
-配置成功只代表凭据可供后续读取，不代表用户授权第三方生图或 AutoDL 视频付费提交。
+聊天输入会留在平台聊天记录中。助手不复述完整密钥，不将密钥写进技能、项目 JSON、报告或临时脚本。工具调用可能由宿主记录，不能承诺聊天配置无日志痕迹。
 
-## 需要配置的 API
+配置授权仅用于保存凭据，不授权生图、视频、dry-run 或任何付费请求。
 
-| 类型 | 必需性 | 用途 | 配置项 |
-|---|---|---|---|
-| AutoDL.Art 视频 API | 必需 | MiniMax-H3 视频生成 | `AUTODL_API_KEY`、`AUTODL_AUTH_SCHEME` |
-| 第三方生图 API | 可选 | 用户选择第三方渠道时生成分镜、尾帧和封面 | 服务商、HTTPS `base_url`、模型、API Key、单张价格 |
-| 第三方文本生成 API | 可选 | 不使用当前 Agent 原生文本能力时生成策划和文案 | 服务商、HTTPS `base_url`、模型、API Key |
+## 对话流程
 
-本机 Codex 生图和 ChatGPT 网页端生图使用登录状态，不需要 API Key。
+没有推荐、默认或预选项；用户已经明确指定的类别直接采用。
 
-## 固定交互
+1. 首先运行当前技能目录内的 `python scripts/api_config.py prompt` 并展示其遮罩状态。失败必须报告“无法读取当前配置状态，永久配置未更改”，不可猜测为未配置。类别行：AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API。用户已指定类别或同时指定图片和文本时直接处理，不再让用户重复选类别。
+2. 从用户当前消息提取连接 JSON（`newapi_channel_conn` 的 key、url）、服务商、图片模型、文本模型和单张价格。去除粘贴造成的 Markdown 包装；域名缺少协议时补 https://，不擅自添加 /v1。同一条连接信息配合两种模型表示图片和文本共用该第三方连接，不得据此覆盖 AutoDL。
+3. 仅询问缺少的必填项。生图单价必须为实际正数，不能猜测、填 null 或默认 0。已有参数不要重复索取。用户未提供新的密钥时允许复用该类别已保存的密钥。
+4. 使用下述非交互入口直接完成保存。不要运行会等待 input/getpass 的旧 configure 命令，不要用 export 或给 JSON 写 status: configured 代替保存。
+5. 保存函数会先校验所有请求类别，再统一写入 Windows 当前用户环境变量，并回读比较；失败回滚。只报告工具真实结果和遮罩密钥，注明“未联网验证”。新对话用正式状态工具读取，不靠聊天记忆判断。
 
-1. 主机必须先运行 `python scripts/api_config.py prompt`，并原样展示输出；不得用 `status` 命令或自行推断替代。若该命令失败，明确回复“无法读取当前配置状态，永久配置未更改”并停止，不得把读取失败推断为“未配置”。
-2. 首条回复只展示遮罩状态和以下唯一有效类别行；没有推荐、默认或预选项：
+## 非交互入口（首选）
 
-```text
-AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API
+在 Hermes 的 Python 代码执行工具中调用当前技能 scripts/api_chat_config.py 的函数。以下示例仅使用占位符；实际调用中由助手把用户已提供的值放入 payload，无需再次索取或要求用户操作终端：
+
+```python
+import sys
+import json
+sys.path.insert(0, r"C:/Users/Administrator/AppData/Local/hermes/skills/creative/product-video-pipeline/scripts")
+from api_chat_config import save_chat_configuration
+
+payload = {
+    "provider": "用户指定的服务商",
+    "connection": {
+        "_type": "newapi_channel_conn",
+        "url": "https://example.com",
+        "key": "<用户提供的密钥>"
+    },
+    "image": {"model": "用户指定的图片模型", "unit_price_yuan": "用户提供的正数"},
+    "text": {"model": "用户指定的文本模型"}
+}
+# 不打印 payload。捕获异常时不要打印异常原文或 traceback。
+try:
+    result = save_chat_configuration(payload)
+except Exception as exc:
+    from api_config import format_error
+    result = {"error": format_error(exc)}
+print(json.dumps(result, ensure_ascii=False, indent=2))
 ```
 
-3. 询问本次配置或更换 `autodl`、`image`、`text` 中的哪一项；用户已经明确指定时直接采用，不重复询问。
-4. 使用交互式终端运行：
+只配置一个类别时省略另一个类别。AutoDL 单独使用 `{"autodl":{"key":"<用户提供的密钥>","auth_scheme":"bearer"}}`，鉴权格式可为 bearer 或 raw。
 
-```powershell
-python scripts/api_config.py configure --category autodl
-python scripts/api_config.py configure --category image
-python scripts/api_config.py configure --category text
-```
-
-5. 完整 API Key 必须由用户在终端隐藏输入中粘贴。不得要求用户在聊天中发送，不得把密钥放入命令行参数。
-6. 工具将配置永久保存到 Windows 当前用户环境变量。只覆盖本次选择的类别，其他配置保持不变。
-7. 回复只报告类别、保存范围、验证结论和密钥末四位。
+代码工具必须能访问本机 Windows 当前用户注册表。若工具运行在隔离环境，使用本机进程的 stdin 传入同样 JSON，调用 `python <当前技能绝对路径>/scripts/api_chat_config.py`；不要通过 shell 字符串插值拼接密钥或把密钥放进命令行参数。两种工具都不可用时明确报告工具限制，不得伪报成功。
 
 ## 永久环境变量
 
-```text
-AUTODL_API_KEY
-AUTODL_AUTH_SCHEME
+- AutoDL：AUTODL_API_KEY、AUTODL_AUTH_SCHEME
+- 图片：PRODUCT_VIDEO_IMAGE_API_PROVIDER、PRODUCT_VIDEO_IMAGE_API_BASE_URL、PRODUCT_VIDEO_IMAGE_API_MODEL、PRODUCT_VIDEO_IMAGE_API_KEY、PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN
+- 文本：PRODUCT_VIDEO_TEXT_API_PROVIDER、PRODUCT_VIDEO_TEXT_API_BASE_URL、PRODUCT_VIDEO_TEXT_API_MODEL、PRODUCT_VIDEO_TEXT_API_KEY
 
-PRODUCT_VIDEO_IMAGE_API_PROVIDER
-PRODUCT_VIDEO_IMAGE_API_BASE_URL
-PRODUCT_VIDEO_IMAGE_API_MODEL
-PRODUCT_VIDEO_IMAGE_API_KEY
-PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN
+密钥保存在 Windows 当前用户环境变量，跨对话共享。旧 IMAGE_API_KEY 和描述 JSON 不代表新版配置已完成。配置入口读取注册表并回读验证，不依赖当前终端继承的临时变量。
 
-PRODUCT_VIDEO_TEXT_API_PROVIDER
-PRODUCT_VIDEO_TEXT_API_BASE_URL
-PRODUCT_VIDEO_TEXT_API_MODEL
-PRODUCT_VIDEO_TEXT_API_KEY
-```
+## 隐藏输入备选
 
-AutoDL 鉴权格式只能是 `bearer` 或 `raw`。第三方 API 的 `base_url` 必须是无内嵌账号、密码、查询串或片段的有效 `https://` 地址。永久生图配置会自动转换为批次所需的非敏感配置，并把密钥变量固定为 `PRODUCT_VIDEO_IMAGE_API_KEY`；批次仍会封存配置和预算，不扩大付费授权。
-
-## 安全与验证
-
-- 状态和日志只显示密钥末四位，完整密钥不进入聊天、技能文件、项目文件、JSON 或 Markdown。
-- 新配置通过完整性和格式检查后才写入；写入失败时恢复原值。
-- 只有服务商提供明确且不扣费的鉴权端点时才允许联网验证。
-- 没有安全验证端点时报告“已保存，未联网验证”，不得用生成图片或视频的付费请求试 Key。
-- 需要更换时，用户再次说 `配置api`；空白密钥输入表示保留现有密钥。
+仅用户主动要求隐藏输入时使用：
+`python scripts/api_config.py configure --category image`（或 text、autodl）。
+不能把它作为对话配置的前置条件。完整性、URL 格式和预算约束保持不变。无安全免费鉴权端点时，不调用生成接口验证 Key。

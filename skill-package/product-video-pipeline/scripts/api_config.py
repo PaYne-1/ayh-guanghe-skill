@@ -313,7 +313,7 @@ def format_configuration_prompt(payload: Mapping[str, object]) -> str:
         f"{status}\n\n"
         "本机 Codex 和 ChatGPT 网页端使用登录状态，不需要配置 API；"
         "MiniMax-H3 视频统一通过 AutoDL.Art。\n\n"
-        "请选择本次需要配置或更换的一项：\n"
+        "可配置类别（可同时配置多项；已指定时直接处理）：\n"
         "AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API"
     )
 
