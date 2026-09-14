@@ -124,6 +124,18 @@ def test_initialize_batch_requires_provider_and_persists_safe_configuration(init
 
 def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
     workflow = load_script("workflow_cli.py")
+    def receipt(provider):
+        path = initialization_kwargs["knowledge_dir"].parent / (provider + "-startup.json")
+        fields = {
+            "product_dir": str(initialization_kwargs["product_dir"]),
+            "product_name": initialization_kwargs["product_name"],
+            "selling_points": ["轻便"], "total": 1, "mode": "auto",
+            "resolution": "768P", "max_budget": "10.00",
+            "cover_reference_dir": str(initialization_kwargs["cover_reference_dir"]),
+            "image_provider": provider,
+        }
+        path.write_text(json.dumps({"confirmed": True, "user_reply": "以上配置确认", "fields": fields}), encoding="utf-8")
+        return str(path)
     base_args = [
         "init",
         "--product-dir", str(initialization_kwargs["product_dir"]),
@@ -138,6 +150,7 @@ def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
     assert workflow.main([
         *base_args,
         "--image-provider", "gpt_web",
+        "--startup-confirmation", receipt("chatgpt_web"),
     ]) == 0
     config = {
         "api_name": "Example Images",
@@ -152,6 +165,7 @@ def test_init_cli_requires_explicit_image_provider(initialization_kwargs):
         *base_args,
         "--image-provider", "third_party_api",
         "--image-api-config", str(config_path),
+        "--startup-confirmation", receipt("third_party_api"),
     ]) == 0
 
 

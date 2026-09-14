@@ -1809,6 +1809,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="创建批次、启动确认单和独立视频目录")
+    init.add_argument("--startup-confirmation", type=Path, help="本次用户确认记录；缺失时拒绝初始化")
     init.add_argument("--product-dir", type=Path, required=True)
     init.add_argument("--product-name", required=True)
     init.add_argument("--selling-point", action="append", required=True, help="可重复；也可用 | 分隔")
@@ -1916,6 +1917,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "init":
+            gate_spec = importlib.util.spec_from_file_location("startup_gate", Path(__file__).with_name("startup_gate.py"))
+            gate = importlib.util.module_from_spec(gate_spec)
+            gate_spec.loader.exec_module(gate)
+            gate.require_confirmation(args.startup_confirmation, {
+                "product_dir": args.product_dir, "product_name": args.product_name,
+                "selling_points": _parse_points(args.selling_point), "total": args.total,
+                "mode": args.mode, "resolution": args.resolution,
+                "max_budget": args.max_budget, "cover_reference_dir": args.cover_reference_dir,
+                "image_provider": args.image_provider,
+            })
             context = initialize_batch(
                 product_dir=args.product_dir,
                 product_name=args.product_name,

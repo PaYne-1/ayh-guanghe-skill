@@ -205,10 +205,11 @@ def _validate_https_url(value: str) -> None:
         raise ConfigurationInputError("base_url 必须是有效的 https:// 地址")
 
 
-def validate_category_values(category: str, values: Mapping[str, str]) -> None:
+def validate_category_values(category: str, values: Mapping[str, str], allow_missing_price: bool = False) -> None:
     if category not in CONFIG_SCHEMAS:
         raise ConfigurationInputError("未知 API 类型")
-    missing = [name for name in CONFIG_SCHEMAS[category] if not values.get(name, "").strip()]
+    missing = [name for name in CONFIG_SCHEMAS[category] if not values.get(name, "").strip()
+               and not (allow_missing_price and name.endswith("_UNIT_PRICE_YUAN"))]
     if missing:
         raise ConfigurationInputError("缺少配置字段：" + ", ".join(missing))
     if category == "autodl":
@@ -216,7 +217,7 @@ def validate_category_values(category: str, values: Mapping[str, str]) -> None:
             raise ConfigurationInputError("AUTODL_AUTH_SCHEME 只能是 bearer 或 raw")
     else:
         _validate_https_url(values[f"PRODUCT_VIDEO_{category.upper()}_API_BASE_URL"])
-        if category == "image":
+        if category == "image" and (values.get("PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN") or not allow_missing_price):
             try:
                 price = Decimal(values["PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN"])
             except (InvalidOperation, ValueError) as exc:
@@ -287,7 +288,8 @@ def status_payload(store=None) -> Dict[str, object]:
         result[category] = {
             "name": CATEGORY_META[category]["name"],
             "requirement": CATEGORY_META[category]["requirement"],
-            "status": "已配置" if all(values.get(name) for name in schema) else "未配置",
+            "status": "已配置" if all(values.get(name) for name in schema if not name.endswith("_UNIT_PRICE_YUAN")) else "未配置",
+            "pricing_status": ("已记录" if values.get("PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN") else "未核实") if category == "image" else "不适用",
             "api_key": mask_secret(values.get(key_name)),
             "settings": public_values,
         }

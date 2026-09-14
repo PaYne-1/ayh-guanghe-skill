@@ -29,11 +29,12 @@ class ChatConfigTests(unittest.TestCase):
         self.assertNotIn('test-only-secret-1234', json.dumps(result))
         self.assertIn('1234', json.dumps(result))
 
-    def test_missing_price_writes_nothing(self):
+    def test_missing_price_saves_credentials_without_inventing_cost(self):
         del self.payload['image']['unit_price_yuan']
-        with self.assertRaises(api_config.ConfigurationInputError):
-            self.module().save_chat_configuration(self.payload, self.store)
-        self.assertEqual(dict(self.store.values), {'AUTODL_API_KEY': 'unchanged'})
+        result = self.module().save_chat_configuration(self.payload, self.store)
+        self.assertEqual(result['categories']['image']['status'], '已配置')
+        self.assertEqual(result['categories']['image']['pricing_status'], '未核实')
+        self.assertIsNone(self.store.get('PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN'))
 
     def test_invalid_url_writes_nothing(self):
         self.payload['connection']['url'] = 'http://example.com'

@@ -9,6 +9,8 @@ description: Use only when the user explicitly says 开始产品视频、制作�
 
 ## 触发与首次回复
 
+**启动第一步是运行 `python scripts/startup_gate.py prompt`，完整转发工具输出的三段清单，然后等待用户填写确认。** 此命令只读技能模板，不扫描产品目录。首次回复不运行 init、dry-run、目录检查或占位文件创建。不得增加“默认值启动”等选项。产品目录、卖点、数量、预算、模式、分辨率、渠道只能来自本次明确输入。产品参考图由用户提供；分镜首帧、尾帧和封面是后续生成的三个不同产物，不索取帧序列。收到确认后按 [启动确认记录](references/startup-confirmation.md) 保存记录，再带 `--startup-confirmation` 调用 init；禁止绕过 CLI 直接调用 initialize_batch。
+
 仅在明确产品视频触发词或 `$product-video-pipeline` 出现时，每次任务的第一步读取并完整展示 [启动确认单](references/startup-checklist.md) 的 `你需要提供的内容`、`本次配置明细`、`请你回复` 三个区块。普通“继续”只继续当前任务；换产品或新批次只先问一次是否开始全新任务。
 
 用户明确说 `配置api`（Latin `api` 后缀**不区分大小写**，包括 `配置API`、`配置Api`、`配置aPi`）时，只进入 [API 永久配置向导](references/api-configuration.md)。主机必须先执行 `python scripts/api_config.py prompt`，成功后原样展示其遮罩状态和唯一类别行，仅在用户未指定类别时询问；已给出图片或文本模型时直接采用对应类别，两项均给出时一起配置；不得自行拼接状态或类别。命令失败时明确回复“无法读取当前配置状态，永久配置未更改”并停止，绝不可推断为“未配置”。首条回复没有推荐、默认或预选项，唯一有效类别行是：
@@ -36,10 +38,11 @@ AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API
 
 ```powershell
 python scripts/workflow_cli.py init `
+  --startup-confirmation "本次启动确认.json" `
   --product-dir "用户产品文件夹" `
   --product-name "产品名称" `
   --selling-point "卖点一" --total 1 --mode auto --resolution 768P `
-  --max-budget 20 --image-provider <codex|chatgpt_web|third_party_api>
+  --max-budget <用户预算> --cover-reference-dir "用户封面参考目录" --image-provider <codex|chatgpt_web|third_party_api>
 ```
 
 生图渠道必须由用户从 `codex`、`chatgpt_web`、`third_party_api` 三项中明确选择；不设默认值，也没有固定尝试顺序。第三方 API 使用 `--image-provider third_party_api --image-api-config <非敏感JSON路径>`。已锁定生图渠道不可替换。初始化后按以下循环执行，始终只执行返回的一个外部动作：

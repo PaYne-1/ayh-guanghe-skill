@@ -14,11 +14,19 @@
 
 1. 首先运行当前技能目录内的 `python scripts/api_config.py prompt` 并展示其遮罩状态。失败必须报告“无法读取当前配置状态，永久配置未更改”，不可猜测为未配置。类别行：AutoDL.Art 视频 API / 第三方生图 API / 第三方文本生成 API。用户已指定类别或同时指定图片和文本时直接处理，不再让用户重复选类别。
 2. 从用户当前消息提取连接 JSON（`newapi_channel_conn` 的 key、url）、服务商、图片模型、文本模型和单张价格。去除粘贴造成的 Markdown 包装；域名缺少协议时补 https://，不擅自添加 /v1。同一条连接信息配合两种模型表示图片和文本共用该第三方连接，不得据此覆盖 AutoDL。
-3. 仅询问缺少的必填项。生图单价必须为实际正数，不能猜测、填 null 或默认 0。已有参数不要重复索取。用户未提供新的密钥时允许复用该类别已保存的密钥。
+3. 仅询问缺少的必填项。生图单价可选，不询问用户；未提供则保留已有价格或标记未核实，不默认为免费。已有参数不要重复索取。用户未提供新的密钥时允许复用该类别已保存的密钥。
 4. 使用下述非交互入口直接完成保存。不要运行会等待 input/getpass 的旧 configure 命令，不要用 export 或给 JSON 写 status: configured 代替保存。
 5. 保存函数会先校验所有请求类别，再统一写入 Windows 当前用户环境变量，并回读比较；失败回滚。只报告工具真实结果和遮罩密钥，注明“未联网验证”。新对话用正式状态工具读取，不靠聊天记忆判断。
 
 ## 非交互入口（首选）
+
+### 中文多行消息直接输入
+
+save_chat_configuration 同时接受原始中文多行字符串，无需用户改成 JSON。支持 AUTODL_API_KEY、AUTODL_AUTH_SCHEME、第三方生图 API、第三方生图 模型、第三方文本生成 API、第三方文本生成 模型，以及各类的“地址”“服务商”和可选的图片“单张价格”。支持中文冒号、Markdown 转义下划线和换行。
+
+助手将用户消息直接作为字符串传入 save_chat_configuration；不要打印原文。第三方生图和文本共用一个地址和密钥，模型分别保存；支持“第三方 API”“第三方 API 地址”配合两种模型，也兼容分别填写生图和文本 API。两类同时出现时自动共享连接；显式提供的连接值冲突时不写入，要求澄清。AutoDL 独立保存，绝不将其密钥自动用作第三方密钥。用户指定的模型名称原样保存，不自动换模型。
+
+未提供的地址、服务商、单价从同类别的永久配置读取。缺少服务商或地址时只询问对应字段；单价不询问、不阻断凭据保存，标记未核实。所有请求类别完整后一起保存；失败不会部分写入。只有密钥和模型但未曾保存服务商/地址时，需要补全连接；缺少价格不影响配置成功。实际计费仍由运行时预算检查处理，不能把未知价格算作零。配置完整不等于网络验证有效；第三方密钥和 AutoDL 密钥不得混用。
 
 在 Hermes 的 Python 代码执行工具中调用当前技能 scripts/api_chat_config.py 的函数。以下示例仅使用占位符；实际调用中由助手把用户已提供的值放入 payload，无需再次索取或要求用户操作终端：
 
@@ -29,13 +37,14 @@ sys.path.insert(0, r"C:/Users/Administrator/AppData/Local/hermes/skills/creative
 from api_chat_config import save_chat_configuration
 
 payload = {
+    "shared_third_party": True,
     "provider": "用户指定的服务商",
     "connection": {
         "_type": "newapi_channel_conn",
         "url": "https://example.com",
         "key": "<用户提供的密钥>"
     },
-    "image": {"model": "用户指定的图片模型", "unit_price_yuan": "用户提供的正数"},
+    "image": {"model": "用户指定的图片模型"},
     "text": {"model": "用户指定的文本模型"}
 }
 # 不打印 payload。捕获异常时不要打印异常原文或 traceback。
