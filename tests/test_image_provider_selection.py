@@ -20,6 +20,22 @@ def load_script(name: str):
     return module
 
 
+@pytest.mark.parametrize("points,total,expected", [
+    (["安全"], 2, ("安全", "安全")),
+    (["轻便", "安全"], 5, ("轻便", "轻便", "轻便", "安全", "安全")),
+])
+def test_selling_points_are_reusable_across_videos(points, total, expected):
+    assert load_script("workflow_cli.py").allocate_video_points(points, total) == expected
+
+
+def test_operator_contract_does_not_require_unique_selling_point_per_video():
+    skill = ROOT / "skill-package/product-video-pipeline"
+    workflow = (skill / "references/workflow.md").read_text(encoding="utf-8")
+    assert "一个卖点对应一条视频。" not in workflow
+    for rel in ("SKILL.md", "references/workflow.md", "references/startup-checklist.md"):
+        assert "同一卖点可以生成多条视频" in (skill / rel).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("value", [None, "", "automatic", "gpt_api"])
 def test_image_provider_is_required_and_closed_to_unknown_values(value):
     policy = load_script("pipeline_policy.py")
