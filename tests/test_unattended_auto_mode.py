@@ -35,7 +35,7 @@ def auto_batch(tmp_path, monkeypatch):
     (product / "reference.png").write_bytes(b"product reference")
     (covers / "cover.png").write_bytes(b"cover reference")
 
-    def create(provider, total_budget="5.00", total_videos=1):
+    def create(provider, total_budget="5.00", total_videos=1, image_price="0.20"):
         config = None
         if provider == "third_party_api":
             monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "offline-only")
@@ -44,7 +44,7 @@ def auto_batch(tmp_path, monkeypatch):
                 "base_url": "https://images.example.test/v1",
                 "model": "image-v1",
                 "api_key_env": "EXAMPLE_IMAGE_API_KEY",
-                "unit_price_yuan": "0.20",
+                **({"unit_price_yuan": image_price} if image_price is not None else {}),
             }
         context = workflow.initialize_batch(
             product_dir=product,
@@ -98,14 +98,15 @@ def test_auto_total_budget_reserves_video_before_third_party_images(auto_batch):
     assert manifest["total_budget_yuan"] == "5.00"
     assert manifest["reserved_v01_video_yuan"] == "3.00"
     assert manifest["initial_image_estimate_yuan"] == "0.60"
-    assert manifest["image_budget_yuan"] == "2.00"
+    assert manifest["image_budget_yuan"] is None
+    assert manifest["budget_scope"] == "video_only"
     assert state.approved_budget == "5.00"
     assert state.estimated_v01_total == "3.00"
     assert state.image_budget_ledger == {}
 
 
-def test_auto_blocks_before_actions_when_total_cannot_cover_v01_and_initial_images(auto_batch):
-    runner, policy, batch, _ = auto_batch("third_party_api", total_budget="3.50")
+def test_auto_blocks_before_actions_when_total_cannot_cover_video(auto_batch):
+    runner, policy, batch, _ = auto_batch("third_party_api", total_budget="2.50")
 
     assert runner.main(["next", "--batch", str(batch)]) == 0
     state = runner.load_or_create_state(batch, policy)
@@ -137,6 +138,18 @@ def test_v01_video_reservation_cannot_exceed_its_sealed_budget(auto_batch, monke
     with pytest.raises(PermissionError, match="V01 视频费用超过已预留视频预算"):
         runner._reserve_payment(batch, item, state, "offline-request")
     assert "V001:V01" not in state.budget_ledger
+
+
+@pytest.mark.parametrize("image_cost", [None, "1000"])
+def test_video_payment_ignores_image_costs(auto_batch, monkeypatch, image_cost):
+    runner, policy, batch, _ = auto_batch("third_party_api", image_price=image_cost)
+    assert runner.main(["next", "--batch", str(batch)]) == 0
+    state = runner.load_or_create_state(batch, policy)
+    item = next(batch.glob("V001_*"))
+    state.image_budget_ledger["image"] = {"cost": image_cost, "status": "spent"}
+    monkeypatch.setattr(runner, "_payload_binding", lambda *_: {"offline": True})
+    runner._reserve_payment(batch, item, state, "offline-request")
+    assert state.budget_ledger["V001:V01"]["cost"] == "3.00"
 
 
 def test_v02_spending_does_not_consume_the_sealed_v01_total_budget(
@@ -259,6 +272,28 @@ def test_auto_delivery_promotes_v01_and_returns_verified_absolute_root_video(
     assert row["image_cost_yuan"] == ("0" if provider == "gpt_web" else "0.60")
     assert runner.load_or_create_state(batch, policy).status == "WAITING_USER_FEEDBACK"
     assert (batch / "批次V01交付.json").is_file()
+    legacy_path = batch / "批次V01交付.json"
+    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    for saved_row in legacy["items"]:
+        saved_row.pop("budget_scope")
+        saved_row.pop("cost_notice")
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    restored = runner.load_or_create_state(batch, policy)
+    assert runner._load_auto_delivery(batch, restored)["items"][0]["budget_scope"] == "video_only"
+
+
+def test_unknown_image_price_survives_init_generation_delivery_and_resume(auto_batch, capsys, monkeypatch):
+    def unknown_batch(provider):
+        return auto_batch(provider, image_price=None)
+    runner, policy, batch, _ = _drive_auto_v01(unknown_batch, "third_party_api", capsys, monkeypatch)
+    assert runner.main(["run-local", "--batch", str(batch)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    row = result["items"][0]
+    assert row["image_cost_yuan"] is None
+    assert row["video_cost_yuan"] == "3.00"
+    assert row["budget_scope"] == "video_only"
+    state = runner.load_or_create_state(batch, policy)
+    assert runner._load_auto_delivery(batch, state)["items"] == result["items"]
 
 
 def test_auto_feedback_requires_explicit_v02_budget_without_mutating_ledger(

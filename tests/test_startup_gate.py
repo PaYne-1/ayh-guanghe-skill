@@ -122,3 +122,15 @@ def test_changed_model_invalidates_saved_price():
     result = api_chat_config.save_chat_configuration('第三方生图 模型：new-model', store)
     assert not store.get('PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN')
     assert result['categories']['image']['pricing_status'] == '未核实'
+
+
+def test_runtime_connection_does_not_require_image_price():
+    store = api_config.MemoryStore({
+        'PRODUCT_VIDEO_IMAGE_API_PROVIDER': 'Example',
+        'PRODUCT_VIDEO_IMAGE_API_BASE_URL': 'https://example.com',
+        'PRODUCT_VIDEO_IMAGE_API_KEY': 'fake',
+        'PRODUCT_VIDEO_IMAGE_API_MODEL': 'model',
+    })
+    config = api_config.image_api_runtime_config(store)
+    assert 'unit_price_yuan' not in config
+    assert config['model'] == 'model'

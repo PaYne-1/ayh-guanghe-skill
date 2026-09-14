@@ -71,6 +71,8 @@ def normalize_image_api_config(value: object) -> dict[str, str]:
     ):
         raise ValueError("image_api_config.base_url 必须使用 https://")
     for key in IMAGE_API_FIELDS[4:]:
+        if value.get(key) in (None, ""):
+            continue
         amount = positive_amount(value.get(key), f"image_api_config.{key}")
         normalized[key] = str(amount)
     return normalized

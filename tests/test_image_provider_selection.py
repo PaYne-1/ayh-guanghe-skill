@@ -49,6 +49,8 @@ def test_third_party_config_requires_non_secret_fields():
     }
     assert policy.normalize_image_api_config(valid) == valid
     for key in valid:
+        if key == "unit_price_yuan":
+            continue
         broken = dict(valid)
         broken.pop(key)
         with pytest.raises(ValueError, match=key):
@@ -280,6 +282,39 @@ def test_approved_provider_selects_exact_image_action(
         assert action["api_config"]["api_key_env"] == "EXAMPLE_IMAGE_API_KEY"
     else:
         assert "api_config" not in action
+
+
+@pytest.mark.parametrize("price", [None, "1000"])
+def test_image_price_does_not_block_video_budget(setup_batch, capsys, api_config_path, monkeypatch, price):
+    monkeypatch.setenv("EXAMPLE_IMAGE_API_KEY", "test-only-key")
+    config = json.loads(api_config_path.read_text(encoding="utf-8"))
+    if price is None:
+        config.pop("unit_price_yuan")
+    else:
+        config["unit_price_yuan"] = price
+    api_config_path.write_text(json.dumps(config), encoding="utf-8")
+    action = approve_and_select_image(setup_batch, capsys, "third_party_api", api_config_path)
+    assert action["kind"] == "THIRD_PARTY_IMAGE_REQUIRED"
+    assert action["budget_scope"] == "video_only"
+    assert action["estimated_cost_yuan"] == price
+    assert action["cost_notice"]
+    runner, policy, batch, _ = setup_batch
+    state = runner.load_or_create_state(batch, policy)
+    assert state.image_budget_ledger[action["action_id"]]["cost"] == price
+
+
+def test_legacy_sealed_manifest_is_validated_without_rewriting(api_batch):
+    runner, policy, batch, state = api_batch
+    original = dict(state.approved_manifest)
+    original.pop("budget_scope")
+    original.pop("cost_notice")
+    original["image_budget_yuan"] = "7.00"
+    state.approved_manifest = original
+    state.manifest_digest = runner._load_policy_module().policy_digest(original)
+    digest = state.manifest_digest
+    runner.validate_approved_manifest(batch, state)
+    assert state.approved_manifest == original
+    assert state.manifest_digest == digest
 
 
 @pytest.mark.parametrize(
@@ -567,7 +602,7 @@ def settle_valid_image(runner, batch, action):
     ])
 
 
-def test_api_budget_exhaustion_emits_no_new_paid_action(api_batch, capsys):
+def test_image_costs_do_not_exhaust_video_budget(api_batch, capsys):
     runner, policy, batch, state = api_batch
     confirmation_path = batch / "启动确认单.json"
     confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
@@ -582,8 +617,8 @@ def test_api_budget_exhaustion_emits_no_new_paid_action(api_batch, capsys):
     state = runner.load_or_create_state(batch, policy)
     assert state.image_budget_ledger[first["action_id"]]["status"] == "spent"
     action = runner.next_action(batch, state, policy)
-    assert action["kind"] == "BLOCKED"
-    assert "图片 API" in action["reason"] and "预算" in action["reason"]
+    assert action["kind"] == "THIRD_PARTY_IMAGE_REQUIRED"
+    assert action["budget_scope"] == "video_only"
 
 
 @pytest.mark.parametrize(

@@ -4,9 +4,9 @@
 
 启动回复必须向用户同时提供三个选项：`本机 Codex 界面`、`ChatGPT 网页端`、`第三方 API`。生图渠道必须选择其中一项；三项平级，不设默认渠道，不规定尝试顺序，也不得自动替用户选择。选择后在批次内锁定；已锁定生图渠道故障时不得自动切换到另一渠道。
 
-内部标识分别为 `codex`、`chatgpt_web`、`third_party_api`。前两项只使用当前登录会话，不使用服务器端 OpenAI API；第三方 API 仅使用封存的 `api_name`、`base_url`、`model`、`api_key_env`、`unit_price_yuan`，不保存密钥值。
+内部标识分别为 `codex`、`chatgpt_web`、`third_party_api`。前两项只使用当前登录会话，不使用服务器端 OpenAI API；第三方 API 仅使用封存的 `api_name`、`base_url`、`model`、`api_key_env` 和可选的 `unit_price_yuan`，不保存密钥值。
 
-用户只确认本批次最高总预算。第三方图片成本由运行器在内部 `image_budget_ledger` 结算，受已封存的总预算和图片份额限制；没有独立的用户图片预算。
+用户只确认本批次最高总预算。预算仅用于视频费用。第三方图片的 `image_budget_ledger` 仅记录独立费用信息，不参与预算拦截；缺少单价不阻止 init 或生成，费用记录为未知而非零。图片和文本可能由服务商另行收费，不计入视频预算。
 
 ## 动作与提交
 

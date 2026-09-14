@@ -253,13 +253,14 @@ def get_config_value(name: str) -> Optional[str]:
 def image_api_runtime_config(store=None) -> Dict[str, str]:
     store = store or WindowsUserEnvironmentStore()
     values = {name: store.get(name) for name in CONFIG_SCHEMAS["image"]}
-    validate_category_values("image", {name: value or "" for name, value in values.items()})
+    validate_category_values("image", {name: value or "" for name, value in values.items()}, allow_missing_price=True)
     return {
         "api_name": str(values["PRODUCT_VIDEO_IMAGE_API_PROVIDER"]),
         "base_url": str(values["PRODUCT_VIDEO_IMAGE_API_BASE_URL"]),
         "model": str(values["PRODUCT_VIDEO_IMAGE_API_MODEL"]),
         "api_key_env": "PRODUCT_VIDEO_IMAGE_API_KEY",
-        "unit_price_yuan": str(values["PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN"]),
+        **({"unit_price_yuan": str(values["PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN"])}
+           if values["PRODUCT_VIDEO_IMAGE_API_UNIT_PRICE_YUAN"] else {}),
     }
 
 

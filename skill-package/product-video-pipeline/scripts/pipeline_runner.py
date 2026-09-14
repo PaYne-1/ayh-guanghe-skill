@@ -263,6 +263,8 @@ def _validate_state(value: object) -> RunnerState:
             or row.get("provider") != "third_party_api"
         ):
             raise ValueError("流水线状态图片 API 费用台账无效")
+        if row.get("cost") is None and row.get("cost_status") == "unverified":
+            continue
         cost = _positive_authorization_amount(row.get("cost"), f"状态图片 API 费用 {key}")
         if str(cost) != row.get("cost"):
             raise ValueError("流水线状态图片 API 费用必须为规范金额")
@@ -564,15 +566,16 @@ def _auto_budget_manifest(
         )
         initial_images = Decimal(config["unit_price_yuan"]) * Decimal(
             3 * len(video_prices)
-        )
+        ) if config.get("unit_price_yuan") else None
     else:
         initial_images = Decimal("0")
-    image_budget = total - reserved_video
     return {
+        "budget_scope": "video_only",
+        "cost_notice": "预算仅统计视频费用；图片和文本可能另行收费，不计入本预算。",
         "total_budget_yuan": str(total),
         "reserved_v01_video_yuan": str(reserved_video),
-        "initial_image_estimate_yuan": str(initial_images),
-        "image_budget_yuan": str(image_budget),
+        "initial_image_estimate_yuan": str(initial_images) if initial_images is not None else None,
+        "image_budget_yuan": None,
     }
 
 
@@ -605,9 +608,8 @@ def _activate_auto_batch(
             )
     total = Decimal(manifest["total_budget_yuan"])
     reserved_video = Decimal(manifest["reserved_v01_video_yuan"])
-    initial_images = Decimal(manifest["initial_image_estimate_yuan"])
-    if reserved_video + initial_images > total:
-        transition(state, "BLOCKED", reason="V01 视频和初始图片预计费用超过总预算")
+    if reserved_video > total:
+        transition(state, "BLOCKED", reason="V01 视频预计费用超过视频预算")
         save_state(batch, state)
         return
     state.approved_budget = manifest["total_budget_yuan"]
@@ -654,6 +656,14 @@ def validate_approved_manifest(batch_dir: Path, state: RunnerState) -> None:
     if not state.approved_manifest or not state.manifest_digest:
         raise PermissionError("缺少已批准的项目费用清单")
     manifest = _confirmation_manifest(batch_dir)
+    if "budget_scope" not in state.approved_manifest:
+        # Reconstruct the old signed shape for comparison only. Never rewrite
+        # authorization hashes, task IDs, pending actions or payment receipts.
+        manifest.pop("budget_scope", None)
+        manifest.pop("cost_notice", None)
+        manifest["image_budget_yuan"] = str(
+            Decimal(manifest["total_budget_yuan"]) - Decimal(manifest["reserved_v01_video_yuan"])
+        )
     if manifest != state.approved_manifest or _load_policy_module().policy_digest(manifest) != state.manifest_digest:
         raise PermissionError("实际项目或配置与已批准清单不一致")
     if Decimal(state.estimated_v01_total) != Decimal(str(manifest["reserved_v01_video_yuan"])):
@@ -720,14 +730,8 @@ def _reserve_payment(batch_dir: Path, item_dir: Path, state: RunnerState, reques
         reserved_v01 = Decimal(state.approved_manifest["reserved_v01_video_yuan"])
         if v01_total + cost > reserved_v01:
             raise PermissionError("V01 视频费用超过已预留视频预算")
-        v01_image_total = sum(
-            (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
-             if row["status"] in {"reserved", "spent", "unknown"}
-             and row.get("version", "V01") == "V01"),
-            Decimal("0"),
-        )
-        if v01_total + v01_image_total + cost > Decimal(state.approved_manifest["total_budget_yuan"]):
-            raise PermissionError("累计图片和 V01 视频费用超过总预算")
+        if v01_total + cost > Decimal(state.approved_manifest["total_budget_yuan"]):
+            raise PermissionError("累计 V01 视频费用超过视频预算")
     else:
         limit = Decimal(state.approved_budget) + sum((Decimal(v) for v in state.rerun_budget_by_video.values()), Decimal("0"))
         if total + cost > limit:
@@ -1173,27 +1177,19 @@ def _reserve_image_api_action(
     config = state.approved_manifest["image_api_config"]
     unit_price = _positive_authorization_amount(
         config["unit_price_yuan"], "图片 API 单价"
-    )
-    batch_budget = Decimal(state.approved_manifest["image_budget_yuan"])
-    if not batch_budget.is_finite() or batch_budget < 0:
-        raise ValueError("图片 API 总预算无效")
-    used = sum(
-        (Decimal(row["cost"]) for row in state.image_budget_ledger.values()
-         if row["status"] in {"reserved", "spent", "unknown"}),
-        Decimal("0"),
-    )
-    if used + unit_price > batch_budget:
-        raise ModelBudgetExceeded("图片 API 总预算已耗尽")
+    ) if config.get("unit_price_yuan") else None
     action = {
         **action,
-        "estimated_cost_yuan": str(unit_price),
-        "remaining_image_budget_yuan": str(batch_budget - used - unit_price),
+        "estimated_cost_yuan": str(unit_price) if unit_price is not None else None,
+        "budget_scope": "video_only",
+        "cost_notice": "图片和文本费用不计入视频预算，服务商可能另行收费；未知图片费用不是免费。",
     }
     action = _store_reserved_action(state, action, "third_party_image_api")
     state.image_budget_ledger[action["action_id"]] = {
         "action_id": action["action_id"],
         "provider": "third_party_api",
-        "cost": str(unit_price),
+        "cost": str(unit_price) if unit_price is not None else None,
+        "cost_status": "estimated" if unit_price is not None else "unverified",
         "version": "V01",
         "status": "reserved",
         "at": _now(),
@@ -1814,7 +1810,10 @@ def _delivery_row(item: Path, state: RunnerState) -> dict[str, object]:
     video_cost = Decimal(str(ledger.get("cost")))
     if video_cost != Decimal(str(state.approved_manifest["price_by_video"][video_id])):
         raise ValueError("V01 视频费用记录与批准价格不一致")
-    image_cost = sum(
+    image_rows = [row for action_id, row in state.image_budget_ledger.items()
+                  if row.get("status") == "spent"
+                  and state.model_actions.get(action_id, {}).get("video_id") == video_id]
+    image_cost = None if any(row.get("cost") is None for row in image_rows) else sum(
         (
             Decimal(str(row["cost"]))
             for action_id, row in state.image_budget_ledger.items()
@@ -1837,7 +1836,9 @@ def _delivery_row(item: Path, state: RunnerState) -> dict[str, object]:
             "sha256": digest,
         },
         "video_cost_yuan": str(video_cost),
-        "image_cost_yuan": str(image_cost),
+        "image_cost_yuan": str(image_cost) if image_cost is not None else None,
+        "budget_scope": "video_only",
+        "cost_notice": "预算仅统计视频；图片与文本由服务商另行计费，不包含在视频预算内。",
         "sha256": digest,
         "status": "V01 已下载，等待用户反馈",
     }
@@ -1852,7 +1853,11 @@ def _load_auto_delivery(batch: Path, state: RunnerState) -> dict[str, object]:
     if not isinstance(rows, list):
         raise ValueError("批次 V01 交付项目必须是列表")
     current = [_delivery_row(item, state) for item in _video_items(batch)]
-    if rows != current:
+    comparable = current
+    if rows and all(isinstance(row, dict) and "budget_scope" not in row for row in rows):
+        comparable = [{k: v for k, v in row.items() if k not in {"budget_scope", "cost_notice"}}
+                      for row in current]
+    if rows != comparable:
         raise ValueError("批次 V01 交付记录与当前文件、技术证据或费用记录不一致")
     return {"kind": "V01_DELIVERED", "status": "WAITING_USER_FEEDBACK", "items": current}
 
