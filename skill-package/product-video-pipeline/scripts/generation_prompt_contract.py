@@ -275,10 +275,50 @@ def _format_second(value: float) -> str:
     return str(int(value)) if value.is_integer() else str(value)
 
 
+def visual_instruction_issues(text: str, segments=(), motion_record=None) -> list[str]:
+    """Conservative lexical checks; not a claim of full semantic verification."""
+    scene = _without_contract_blocks(text, (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK))
+    for segment in segments:
+        if isinstance(segment, Mapping) and isinstance(segment.get("dialogue"), str):
+            # Exclude only a complete generated dialogue line, never matching scene prose.
+            line_pattern = (r"(?m)^\d+(?:\.\d+)?–\d+(?:\.\d+)?秒 speaker_id=[^（\n]+（[^）\n]+）："
+                            + re.escape(segment["dialogue"]) + r"$")
+            scene = re.sub(line_pattern, "", scene)
+    allowed = []
+    if motion_record is not None:
+        if (not isinstance(motion_record, Mapping)
+                or motion_record.get("confirmed_by_user") is not True
+                or not isinstance(motion_record.get("motion_clauses"), list)
+                or not motion_record["motion_clauses"]
+                or not all(isinstance(v, str) and v.strip() for v in motion_record["motion_clauses"])):
+            return ["video.motion_record_invalid"]
+        allowed = [v.strip() for v in motion_record["motion_clauses"]]
+    camera = re.compile(r"运镜|推拉|摇移|环绕|变焦|切镜|跳切|转场|换景|切换场景|插入.*(?:空镜|画面)|(?:镜头|机位).{0,8}(?P<camera_action>推进|拉近|拉远|移动|转动)")
+    motion = re.compile(r"移动|前进|后退|行驶|驶入|驶出|转弯|旋转|加速|减速|滚动|运动|折叠|展开")
+    issues = []
+    for clause in re.split(r"[。；;，,\n]|但是|不过|然而|但|却|而是|然后|随后|并且|并|同时", scene):
+        clause = clause.strip()
+        if not clause:
+            continue
+        negated = re.search(r"禁止|不得|不要|不允许|不可|严禁|不做|不进行|不能|避免|(?:不|无)(?=运镜|推拉|摇移|环绕|变焦|切镜|跳切|转场|换景|移动|前进|后退|行驶|运动)", clause)
+        double_negative = re.search(r"(?:不|不要|不得)(?:再)?(?:禁止|限制|避免)", clause)
+        # A negation applies only to the verbs after it, not preceding commands.
+        def affirmative(pattern):
+            return any(double_negative or not negated or
+                       (m.start("camera_action") if m.lastgroup == "camera_action" else m.start()) < negated.start()
+                       for m in pattern.finditer(clause))
+        if affirmative(camera) and "video.visual_conflict" not in issues:
+            issues.append("video.visual_conflict")
+        if affirmative(motion) and clause not in allowed and "video.product_motion_unconfirmed" not in issues:
+            issues.append("video.product_motion_unconfirmed")
+    return issues
+
+
 def compile_video_prompt(
     base_prompt: str,
     people: list[dict[str, object]],
     segments: list[dict[str, object]],
+    motion_record: dict | None = None,
 ) -> str:
     """Compile a single-shot, two-person Chinese dialogue video prompt."""
     scene = _without_contract_blocks(
@@ -286,6 +326,9 @@ def compile_video_prompt(
         (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK),
     )
     _reject_product_appearance(scene)
+    conflicts = visual_instruction_issues(scene, (), motion_record)
+    if conflicts:
+        raise ValueError("视频指令冲突：" + ",".join(conflicts))
     person_ids, person_identities = _person_profiles(people)
     validated_segments = _validated_segments(segments, person_ids)
     dialogue_lines = [
@@ -301,10 +344,11 @@ def compile_video_prompt(
     ))
 
 
-def validate_video_request(prompt: str, segments: list[dict[str, object]]) -> list[str]:
+def validate_video_request(prompt: str, segments: list[dict[str, object]], motion_record=None) -> list[str]:
     """Return stable video contract violations without changing the prompt."""
     text = prompt if isinstance(prompt, str) else ""
     issues: list[str] = []
+    issues.extend(visual_instruction_issues(text, segments, motion_record))
     if isinstance(prompt, str):
         try:
             _reject_product_appearance(prompt)

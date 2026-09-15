@@ -1325,13 +1325,22 @@ def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
     process = item / "_工作文件/生成过程"
     package = json.loads((process / "策划内容.json").read_text(encoding="utf-8"))
     prompt_contract = _load_prompt_contract()
+    motion_record_path = process / "分镜动作确认.json"
+    motion_record = None
+    if motion_record_path.is_file():
+        motion_record = json.loads(motion_record_path.read_text(encoding="utf-8"))
+        storyboard = workflow.validated_promoted_artifact_path(item, "分镜图.png")
+        if (not isinstance(motion_record, dict) or storyboard is None
+                or motion_record.get("storyboard_sha256") != _sha256(storyboard)):
+            raise ValueError("video.motion_record_invalid：动作确认未绑定当前分镜图")
     compiled = prompt_contract.compile_video_prompt(
         str(package["video_prompt"]),
         list(package["people"]),
         list(package["script_segments"]),
+        motion_record=motion_record,
     )
     issues = prompt_contract.validate_video_request(
-        compiled, list(package["script_segments"])
+        compiled, list(package["script_segments"]), motion_record=motion_record
     )
     if issues:
         raise ValueError("视频提交提示词预检失败：" + ",".join(issues))

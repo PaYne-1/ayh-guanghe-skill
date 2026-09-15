@@ -132,6 +132,57 @@ def test_video_prompt_locks_single_shot_and_dialogue_contract(contract, people, 
     assert "video.storyboard_lock_missing" in contract.validate_video_request(
         prompt.replace("分镜图是全程唯一画面基准", ""), segments)
 
+
+@pytest.mark.parametrize("conflict", ["连续平稳运镜", "镜头缓慢推进", "环绕拍摄", "插入空镜", "切换场景", "不要禁止运镜"])
+def test_conflicting_visual_instructions_rejected(contract, people, segments, conflict):
+    with pytest.raises(ValueError, match="video.visual_conflict"):
+        contract.compile_video_prompt(conflict, people, segments)
+    valid = contract.compile_video_prompt("固定机位", people, segments)
+    assert "video.visual_conflict" in contract.validate_video_request(valid + "\n" + conflict, segments)
+
+
+def test_negated_camera_rules_are_not_conflicts(contract, people, segments):
+    prompt = contract.compile_video_prompt("禁止运镜、推拉、摇移和环绕拍摄；不要切换场景。产品保持原位。不切镜，无转场。", people, segments)
+    assert contract.validate_video_request(prompt, segments) == []
+    assert contract.visual_instruction_issues("镜头不移动") == []
+    assert "video.visual_conflict" in contract.visual_instruction_issues("不要切镜并缓慢运镜")
+    assert "video.product_motion_unconfirmed" in contract.visual_instruction_issues(
+        "产品向前缓慢移动", [{"dialogue": "产品向前缓慢移动"}])
+
+
+def test_confirmed_motion_is_exact_and_never_allows_camera_motion(contract, people, segments):
+    motion = "产品带人缓慢连续向前移动"
+    record = {"confirmed_by_user": True, "motion_clauses": [motion]}
+    prompt = contract.compile_video_prompt(motion, people, segments, motion_record=record)
+    assert contract.validate_video_request(prompt, segments, motion_record=record) == []
+    assert "video.product_motion_unconfirmed" in contract.validate_video_request(prompt, segments)
+    with pytest.raises(ValueError, match="video.product_motion_unconfirmed"):
+        contract.compile_video_prompt("产品快速向前移动", people, segments, motion_record=record)
+    with pytest.raises(ValueError, match="video.visual_conflict"):
+        contract.compile_video_prompt("禁止切镜但连续平稳运镜", people, segments, motion_record=record)
+    with pytest.raises(ValueError, match="video.motion_record_invalid"):
+        contract.compile_video_prompt(motion, people, segments, motion_record={"confirmed_by_user": False})
+
+
+def test_dialogue_does_not_hide_same_text_in_scene(contract, people, segments):
+    segments = [dict(s) for s in segments]
+    segments[0]["dialogue"] = "产品向前缓慢移动"
+    valid = contract.compile_video_prompt("产品保持原位", people, segments)
+    assert contract.validate_video_request(valid, segments) == []
+    with pytest.raises(ValueError, match="video.product_motion_unconfirmed"):
+        contract.compile_video_prompt("产品向前缓慢移动", people, segments)
+    assert "video.product_motion_unconfirmed" in contract.validate_video_request(
+        valid + "\n产品向前缓慢移动", segments)
+
+
+def test_unrecorded_product_motion_rejected(contract, people, segments):
+    with pytest.raises(ValueError, match="video.product_motion_unconfirmed"):
+        contract.compile_video_prompt("产品带人缓慢连续向前移动", people, segments)
+    valid = contract.compile_video_prompt("固定机位", people, segments)
+    assert "video.product_motion_unconfirmed" in contract.validate_video_request(
+        valid + "\n产品带人缓慢连续向前移动", segments)
+
+    prompt = valid
     for rule in (
         "产品参考图是唯一产品依据",
         "0–15秒",

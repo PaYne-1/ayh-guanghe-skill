@@ -731,8 +731,18 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
     assert "action_id" not in result
 
 
+def test_motion_record_must_bind_current_storyboard(setup_batch, capsys):
+    runner, _, batch, items, _ = setup_batch
+    state = ready(setup_batch, capsys)
+    record_path = items[0] / "_工作文件/生成过程/分镜动作确认.json"
+    write(record_path, {"confirmed_by_user": True, "storyboard_sha256": "stale",
+                        "motion_clauses": ["产品向前移动"]})
+    with pytest.raises(ValueError, match="video.motion_record_invalid"):
+        runner.prepare_payload(batch, items[0], state)
+
+
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.10.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.11.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}
