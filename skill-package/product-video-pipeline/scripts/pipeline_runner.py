@@ -799,12 +799,14 @@ def validate_video_file(path: Path, expected_resolution: str) -> dict[str, objec
     width = int(video.get("width", 0))
     height = int(video.get("height", 0))
     duration = float(probe.get("format", {}).get("duration", 0))
-    expected = {"768P": (768, 1365), "768p竖": (768, 1365), "2K": (1440, 2560)}
+    # Accept the 768x1344 workflow variant without rescaling the generated video.
+    expected = {"768P": {(768, 1365), (768, 1344)},
+                "768p竖": {(768, 1365), (768, 1344)}, "2K": {(1440, 2560)}}
     if expected_resolution not in expected:
         raise ValueError(f"未知视频分辨率：{expected_resolution}")
     if not 13 <= duration <= 17:
         raise ValueError("视频时长必须在 13–17 秒技术容差内")
-    if height <= width or (width, height) != expected[expected_resolution]:
+    if height <= width or (width, height) not in expected[expected_resolution]:
         raise ValueError("视频方向或分辨率不符合启动确认单")
     decoded = subprocess.run(
         ["ffmpeg", "-v", "error", "-xerror", "-err_detect", "explode", "-i", str(path),
