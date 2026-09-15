@@ -1459,7 +1459,7 @@ def validate_content_package(package: Dict[str, object], profile: Dict[str, obje
         issues.append("shot.single_required")
     if any(
         rule not in video_prompt
-        for rule in ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+        for rule in ("一镜到底", "固定机位", "完整双人对话口播")
     ):
         issues.append("shot.full_duration_rules_missing")
 

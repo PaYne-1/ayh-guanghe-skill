@@ -81,6 +81,12 @@ def test_image_contract_rejects_unknown_artifact(contract):
         contract.compile_image_prompt("公园出行", "产品图.png")
 
 
+def test_tail_frame_keeps_storyboard_composition(contract):
+    prompt = contract.compile_image_prompt("同一画面动作结束", "尾帧图.png")
+    assert contract.TAIL_CONTINUITY_BLOCK in prompt
+    assert contract.compile_image_prompt(prompt, "尾帧图.png").count(contract.TAIL_CONTINUITY_BLOCK) == 1
+
+
 def test_image_validator_returns_stable_codes_without_editing_prompt(contract):
     prompt = "普通图片提示词"
 
@@ -120,6 +126,11 @@ def segments():
 
 def test_video_prompt_locks_single_shot_and_dialogue_contract(contract, people, segments):
     prompt = contract.compile_video_prompt("公园内自然同行", people, segments)
+    assert "分镜图是全程唯一画面基准" in prompt
+    assert "固定机位" in prompt
+    assert "只允许说话口型、自然微表情和分镜明确指定的产品运动" in prompt
+    assert "video.storyboard_lock_missing" in contract.validate_video_request(
+        prompt.replace("分镜图是全程唯一画面基准", ""), segments)
 
     for rule in (
         "产品参考图是唯一产品依据",

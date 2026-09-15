@@ -255,7 +255,7 @@ def main() -> int:
         payload.write_text(
             json.dumps(
                 {
-                    "prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
+                    "prompt": "一镜到底，固定机位，完整双人对话口播",
                     "duration": 15,
                     "resolution": "768p竖",
                     "first_frame": "data:image/png;base64,AAAA",
@@ -381,7 +381,7 @@ def main() -> int:
         ],
         "storyboard_prompt": "渠道支持的原生分辨率，固定中远景，老人和陪护者与完整产品处于安全区",
         "last_frame_prompt": "渠道支持的原生分辨率，固定中远景，连续前进后的合理尾帧",
-        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
+        "video_prompt": "一镜到底，固定机位，完整双人对话口播",
         "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善。画面保持真实自然，两人始终同框，轮椅结构清楚完整，内容表达克制，不夸大产品效果，也不虚构价格参数，并提醒有需要的家庭结合实际情况认真选择。",
         "hashtags": profile["fixed_hashtags"],
     }
@@ -391,7 +391,7 @@ def main() -> int:
     for malformed in ([], "invalid", None, {"storyboard_people": None}, {"hashtags": None}):
         assert workflow_module.validate_content_package(malformed, profile)
     incomplete_prompt_content = dict(single_person_content)
-    incomplete_prompt_content["video_prompt"] = "一镜到底，连续平稳运镜"
+    incomplete_prompt_content["video_prompt"] = "一镜到底，固定机位"
     assert "shot.full_duration_rules_missing" in workflow_module.validate_content_package(
         incomplete_prompt_content, profile
     )

@@ -111,7 +111,14 @@ def valid_portrait_dimensions(width, height):
 
 VIDEO_VISUAL_BLOCK = """【固定画面规则】
 0–15秒全程一个连续镜头，固定中远景，禁止切镜、跳切或转场。
-人物全身和产品整体始终完整位于画面安全区。"""
+人物全身和产品整体始终完整位于画面安全区。
+分镜图是全程唯一画面基准：在同一张画面上做局部动画，不重新创作画面。
+固定机位，背景、构图、景别、光线、人物身份与服装、产品外观和数量全程保持分镜一致；禁止推拉、摇移、环绕、变焦、换景、插入空镜、特写或无关画面。
+只允许说话口型、自然微表情和分镜明确指定的产品运动；未指定运动时产品保持原位。运动不得改变产品结构或使主体离开画面。
+尾帧仅作为同一画面内动作结束状态，不得引入新场景或新构图；不得根据台词或卖点联想生成其他画面。"""
+
+TAIL_CONTINUITY_BLOCK = """【尾帧画面延续】
+以已提供的分镜图为画面基准，保持同一背景、构图、机位、光线、人物身份与服装及产品外观和数量；只表现分镜明确指定动作的结束状态。不得另创场景或改变景别，不额外安排动作。"""
 
 VIDEO_AUDIO_BLOCK = """【固定口播规则】
 人物严格交替说话；每句只由指定人物说出。
@@ -170,12 +177,15 @@ def compile_image_prompt(base_prompt: str, artifact_name: str) -> str:
         raise ValueError(f"artifact 不受支持：{artifact_name}")
     scene = _without_contract_blocks(
         _clean_text(base_prompt, "base_prompt"),
-        (PRODUCT_REFERENCE_BLOCK, NATIVE_4K_BLOCK),
+        (PRODUCT_REFERENCE_BLOCK, NATIVE_4K_BLOCK, TAIL_CONTINUITY_BLOCK),
     )
     _reject_product_appearance(scene)
     if not scene:
         raise ValueError("base_prompt 必须包含场景文本")
-    return "\n\n".join((scene, PRODUCT_REFERENCE_BLOCK, NATIVE_4K_BLOCK))
+    blocks = [scene, PRODUCT_REFERENCE_BLOCK, NATIVE_4K_BLOCK]
+    if artifact_name == "尾帧图.png":
+        blocks.append(TAIL_CONTINUITY_BLOCK)
+    return "\n\n".join(blocks)
 
 
 def validate_image_request(
@@ -307,6 +317,9 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]]) -> li
         ("0–15秒", "video.single_shot_missing"),
         ("一个连续镜头", "video.single_shot_missing"),
         ("固定中远景", "video.framing_missing"),
+        ("固定机位", "video.framing_missing"),
+        ("分镜图是全程唯一画面基准", "video.storyboard_lock_missing"),
+        ("只允许说话口型、自然微表情和分镜明确指定的产品运动", "video.motion_scope_missing"),
         ("人物全身和产品整体始终完整位于画面安全区", "video.safe_area_missing"),
         ("严格交替说话", "video.speaker_alternation_missing"),
         ("非当前说话者嘴巴闭合且完全不发声", "video.non_speaker_silence_missing"),

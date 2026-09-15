@@ -78,7 +78,7 @@ def validate_first_last_payload(payload: Dict[str, object]) -> None:
     if payload["first_frame"] == payload["last_frame"]:
         raise ValueError("last_frame 必须独立生成，不得复用 first_frame")
     prompt = str(payload["prompt"])
-    required_rules = ("一镜到底", "连续平稳运镜", "完整双人对话口播")
+    required_rules = ("一镜到底", "固定机位", "完整双人对话口播")
     missing_rules = [rule for rule in required_rules if rule not in prompt]
     if missing_rules:
         raise ValueError("prompt 缺少全程规则：" + ", ".join(missing_rules))

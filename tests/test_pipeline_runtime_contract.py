@@ -42,7 +42,7 @@ def package(video_id):
         "storyboard_people": ["P1", "P2"],
         "script_segments": [{"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"}, {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"}, {"start": 11, "end": 15, "speaker_id": "P2", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"}],
         "storyboard_prompt": "竖屏9:16，两位女性始终同框，不要文字。", "last_frame_prompt": "合理尾帧，主体前进1至1.5米，人物产品一致。",
-        "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播，不要背景音乐。",
+        "video_prompt": "一镜到底，固定机位，完整双人对话口播，不要背景音乐。",
         "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
         "hashtags": ["#爱优护电动轮椅", "#ainsnbot高端智能电动轮椅", "#电动轮椅", "#老人专用电动轮椅"],
     }
@@ -273,9 +273,9 @@ def test_content_validation_rejects_product_appearance_description(field):
     [
         ("storyboard_prompt", "老人手放控制器上，保持扶手结构一致。"),
         ("last_frame_prompt", "不要改变靠背，产品整体自然前进。"),
-        ("video_prompt", "一镜到底，连续平稳运镜，完整双人对话口播，手放控制器上，不要背景音乐。"),
+        ("video_prompt", "一镜到底，固定机位，完整双人对话口播，手放控制器上，不要背景音乐。"),
         ("storyboard_prompt", "老人穿红色衣服，手放控制器。"),
-        ("video_prompt", "一镜到底，连续平稳运镜，完整双人对话口播，按控制器增加速度，不要背景音乐。"),
+        ("video_prompt", "一镜到底，固定机位，完整双人对话口播，按控制器增加速度，不要背景音乐。"),
     ],
 )
 def test_content_validation_allows_component_action_and_reference_lock(field, prose):
@@ -692,7 +692,7 @@ def test_diagnostic_cli_reserves_before_execution_and_accepts_once(setup_batch, 
 def test_raw_paid_response_survives_missing_task_id(tmp_path, monkeypatch):
     client = module("autodl_h3")
     payload = tmp_path / "request.json"
-    write(payload, {"prompt": "一镜到底，连续平稳运镜，完整双人对话口播", "duration": 15, "resolution": "768p竖", "first_frame": "data:image/png;base64,AAAA", "last_frame": "data:image/png;base64,BBBB"})
+    write(payload, {"prompt": "一镜到底，固定机位，完整双人对话口播", "duration": 15, "resolution": "768p竖", "first_frame": "data:image/png;base64,AAAA", "last_frame": "data:image/png;base64,BBBB"})
     raw = {"code": 42, "msg": "provider rejected", "request_id": "r"}
     monkeypatch.setattr(client, "_json_request", lambda *a, **k: raw)
     evidence = tmp_path / "raw-response.json"
@@ -732,7 +732,7 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.9.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.10.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}
