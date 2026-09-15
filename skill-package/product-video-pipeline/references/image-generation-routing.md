@@ -10,13 +10,15 @@
 
 ## 动作与提交
 
-`next` 按已选渠道返回 `CODEX_IMAGE_REQUIRED`、`CHATGPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，均包含真实参考图绝对路径、提交提示词路径和 `width: 2160`、`height: 3840`、`native_resolution_required: true`。宿主只执行该动作，下载后用：
+不强制4K，不要求精确2160×3840。`pipeline_policy.json` 中 target_width/target_height 是旧版兼容字段，不再作为请求或验收尺寸。按渠道文档映射实际支持的尺寸参数，默认 `size: auto` 并在提示词明确9:16；`aspect_ratio` 是动作要求，不代表所有接口都有同名参数。若渠道不支持 auto，使用其已确认支持的9:16原生尺寸，不擅自虚构4K型号。下载原始文件检查真实像素，不能用页面预览代替原图。
+
+`next` 按已选渠道返回 `CODEX_IMAGE_REQUIRED`、`CHATGPT_WEB_IMAGE_REQUIRED` 或 `THIRD_PARTY_IMAGE_REQUIRED`，均包含真实参考图绝对路径、提交提示词路径和 `size: auto`、`aspect_ratio: 9:16`、`native_resolution_required: true`。宿主只执行该动作，下载后用：
 
 ```powershell
 python scripts/pipeline_runner.py accept-image --batch "批次目录" --action-id "动作ID" --source "下载文件"
 ```
 
-分镜、尾帧和封面均要求**产品参考图是唯一产品依据**，禁止用文字重新描述产品外观。渠道直接生成**原生2160×3840** PNG；**禁止本地放大**、拉伸、裁切、补画或重绘。运行器仅允许可解码、尺寸精确、RGB 转换和 SHA-256 校验，不进行人工图片审核或模型视觉审核。
+分镜、尾帧和封面均要求**产品参考图是唯一产品依据**，禁止用文字重新描述产品外观。渠道直接生成**渠道支持的原生分辨率** PNG；**禁止本地放大**、拉伸、裁切、补画或重绘。运行器仅允许可解码、9:16画幅（允许1像素取整误差）、RGB 转换和 SHA-256 校验，不进行人工图片审核或模型视觉审核。
 
 技术失败使用同一渠道和原动作的恢复/重试流程。`image-failed --submission-state not_sent|sent|unknown` 记录结算：`not_sent` 释放未用预留；`sent` 计入成本；默认 `unknown` 保留成本并阻止自动重试。
 

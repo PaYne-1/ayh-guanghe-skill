@@ -1537,7 +1537,7 @@ def save_content_package(item_dir: Path, package_path: Path, profile_path: Path)
     _write_candidate_preserving_previous(item_dir, "封面标题.txt", str(package["cover_title"]), now)
     _write_candidate_preserving_previous(
         item_dir, "封面提示词.txt",
-        "竖屏9:16，2160×3840。参考分镜及产品图保持人物与产品结构，参考风格图生成完整电商封面。"
+        "竖屏9:16，使用渠道支持的原生分辨率。参考分镜及产品图保持人物与产品结构，参考风格图生成完整电商封面。"
         + "准确绘制标题：" + str(package["cover_title"]) + "。不要其他文字。", now,
     )
     _write_candidate_preserving_previous(item_dir, "发布正文.txt", f"{package['publish_body']}\n", now)

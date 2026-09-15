@@ -379,8 +379,8 @@ def main() -> int:
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "回答"},
             {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以选择"},
         ],
-        "storyboard_prompt": "原生2160×3840，固定中远景，老人和陪护者与完整产品处于安全区",
-        "last_frame_prompt": "原生2160×3840，固定中远景，连续前进后的合理尾帧",
+        "storyboard_prompt": "渠道支持的原生分辨率，固定中远景，老人和陪护者与完整产品处于安全区",
+        "last_frame_prompt": "渠道支持的原生分辨率，固定中远景，连续前进后的合理尾帧",
         "video_prompt": "一镜到底，连续平稳运镜，完整双人对话口播",
         "publish_body": "这是一段用于验证内容契约的产品介绍正文，描述老人乘坐爱优护电动轮椅直线缓慢前行，与陪护者自然交流操作体验和出行改善。画面保持真实自然，两人始终同框，轮椅结构清楚完整，内容表达克制，不夸大产品效果，也不虚构价格参数，并提醒有需要的家庭结合实际情况认真选择。",
         "hashtags": profile["fixed_hashtags"],
@@ -426,10 +426,10 @@ def main() -> int:
         assert (process / "发布正文.txt").read_text(encoding="utf-8") == valid_content["publish_body"] + "\n"
         assert (process / "话题标签.txt").read_text(encoding="utf-8") == " ".join(valid_content["hashtags"]) + "\n"
     required_phrases = {
-        "SKILL.md": ("首次回复同时授权 V01", "原生2160×3840", "WAITING_USER_FEEDBACK", "真实存在的绝对路径"),
+        "SKILL.md": ("首次回复同时授权 V01", "渠道支持的原生分辨率", "WAITING_USER_FEEDBACK", "真实存在的绝对路径"),
         "references/startup-checklist.md": ("你需要提供的内容", "本次配置明细", "请你回复", "本批次最高总预算", "首次回复同时授权 V01", "api_key_env"),
         "references/content-contract.md": ("产品参考图是唯一产品依据", "禁止用文字重新描述产品外观", "非当前说话者嘴巴闭合且完全不发声", "清单之外零人声"),
-        "references/image-generation-routing.md": ("CODEX_IMAGE_REQUIRED", "CHATGPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED", "原生2160×3840", "禁止本地放大"),
+        "references/image-generation-routing.md": ("CODEX_IMAGE_REQUIRED", "CHATGPT_WEB_IMAGE_REQUIRED", "THIRD_PARTY_IMAGE_REQUIRED", "渠道支持的原生分辨率", "禁止本地放大"),
         "references/workflow.md": ("first_frame", "last_frame", "固定中远景", "V01_DELIVERED", "WAITING_USER_FEEDBACK"),
         "references/autodl-h3.md": ("first_frame", "last_frame", "minimax_h3_lightx2v_v5_15s", "清单之外零人声"),
         "references/delivery-contract.md": ("真实存在的绝对路径", "V01 已下载，等待用户反馈", "WAITING_USER_FEEDBACK"),

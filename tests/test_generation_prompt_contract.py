@@ -28,8 +28,8 @@ def test_image_prompt_uses_reference_as_only_product_source(contract):
 
     assert "产品参考图是唯一产品依据" in prompt
     assert "禁止重新设计、补画、删减、替换或推测" in prompt
-    assert "2160×3840" in prompt
-    assert "8,294,400" in prompt
+    assert "渠道支持的原生分辨率" in prompt
+    assert "不强制4K" in prompt
     assert prompt.count(contract.PRODUCT_REFERENCE_BLOCK) == 1
     assert prompt.count(contract.NATIVE_4K_BLOCK) == 1
     assert contract.validate_image_request(
@@ -87,7 +87,7 @@ def test_image_validator_returns_stable_codes_without_editing_prompt(contract):
     assert contract.validate_image_request(prompt, [], 1920, 1080) == [
         "image.reference_missing",
         "image.reference_lock_missing",
-        "image.native_4k_missing",
+        "image.native_resolution_missing",
         "image.dimensions_invalid",
     ]
     assert prompt == "普通图片提示词"

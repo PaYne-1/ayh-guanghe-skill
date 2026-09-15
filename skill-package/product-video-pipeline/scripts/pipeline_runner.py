@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -435,16 +436,27 @@ def _submit_item(
 def _poll_item(task_id: str, api_key: Optional[str]) -> dict[str, object]:
     autodl = _load_autodl()
     policy = _load_policy_module().load_policy(Path(__file__).resolve().parents[1])
-    response = autodl.poll_task(
-        task_id, api_key=api_key,
-        auth_scheme=_config_value("AUTODL_AUTH_SCHEME") or "bearer",
-        interval_seconds=policy["autodl"]["poll_interval_seconds"],
-        max_wait_seconds=policy["autodl"]["poll_timeout_seconds"],
-    )
+    try:
+        response = autodl.query_task(
+            task_id, api_key=api_key,
+            auth_scheme=_config_value("AUTODL_AUTH_SCHEME") or "bearer",
+            timeout=20,
+        )
+    except (RuntimeError, TimeoutError, OSError) as exc:
+        http = re.search(r"AutoDL HTTP (\d{3})", str(exc))
+        if http and int(http.group(1)) in {400, 401, 403, 404, 410, 422}:
+            return {"status": "query_failed", "remote_status": "query_rejected",
+                    "http_status": int(http.group(1)),
+                    "reason": "查询被拒绝，请核对鉴权与已有任务；禁止重新提交。"}
+        return {"status": "poll_timeout", "remote_status": "query_unavailable",
+                "next_poll_after_seconds": policy["autodl"]["poll_interval_seconds"]}
     status = autodl.task_status(response)
     result: dict[str, object] = {"status": status, "response": response}
     if status in {"success", "succeeded", "completed"}:
         result["url"] = autodl.first_result_url(response)
+    elif status not in {"failed", "cancelled", "canceled"}:
+        result.update(status="poll_timeout", remote_status=status,
+                      next_poll_after_seconds=policy["autodl"]["poll_interval_seconds"])
     return result
 
 
@@ -690,7 +702,7 @@ def _payload_binding(batch_dir: Path, item_dir: Path, state: RunnerState) -> dic
             raise PermissionError(f"提交缺少有效已授权图片：{name}")
         with Image.open(image) as decoded:
             decoded.load()
-            if decoded.size != (2160, 3840):
+            if not _load_prompt_contract().valid_portrait_dimensions(*decoded.size):
                 raise PermissionError("提交图片尺寸与批准规则不一致")
         value = payload.get(field)
         if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
@@ -899,7 +911,28 @@ def _run_autodl_locked(
             state.budget_ledger[key].update({"status": "spent", "task_id": task_id})
             state.item_failures.pop(video_id, None)
             save_state(batch_dir, state)
+    now = time.time()
+    if info.get("next_poll_at", 0) > now:
+        return {"ok": False, "task_id": task_id, "status": "poll_timeout",
+                "next_poll_after_seconds": max(1, int(info["next_poll_at"] - now))}
+    info.setdefault("poll_started_at", now)
+    print(f"视频 {video_id}：查询已提交任务状态，不重复提交。", file=sys.stderr, flush=True)
     polled = _poll_item(task_id, api_key)
+    info["query_error_count"] = (info.get("query_error_count", 0) + 1
+                                  if polled.get("remote_status") == "query_unavailable" else 0)
+    if polled["status"] == "query_failed" or info["query_error_count"] >= 5:
+        info.update(status="QUERY_FAILED", last_query_at=_now(),
+                    remote_status=polled.get("remote_status"))
+        _write_task_info(item_dir, info)
+        return {"ok": False, "task_id": task_id, "status": "RECONCILIATION_REQUIRED",
+                "reason": polled.get("reason", "连续5次查询失败，请核对连接后继续查询已有任务；禁止重新提交。")}
+    info.update(last_query_at=_now(), remote_status=polled.get("remote_status", polled["status"]),
+                elapsed_seconds=max(0, int(time.time() - info["poll_started_at"])))
+    if polled["status"] == "poll_timeout":
+        info["next_poll_at"] = time.time() + polled.get("next_poll_after_seconds", 20)
+    else:
+        info.pop("next_poll_at", None)
+    _write_task_info(item_dir, info)
     _record_execution(item_dir, "查询结果.json", polled)
     resumed_task_id = task_id if not submitted else ""
     if polled["status"] not in {"success", "succeeded", "completed"}:
@@ -938,21 +971,21 @@ def _persist_video_evidence(item_dir: Path, evidence: dict[str, object]) -> None
 
 
 def validate_native_4k_image(
-    source: Path, output: Path, *, width: int = 2160, height: int = 3840
+    source: Path, output: Path, *, width: Optional[int] = None, height: Optional[int] = None
 ) -> dict[str, object]:
     source = Path(source).resolve()
     output = Path(output).resolve()
     if not source.is_file() or source.stat().st_size == 0:
         raise ValueError("生成图片结果不存在或为空")
-    if width <= 0 or height <= 0:
-        raise ValueError("图片目标尺寸必须为正数")
+    if (width, height) != (None, None) and not _load_prompt_contract().valid_portrait_dimensions(width, height):
+        raise ValueError("图片目标尺寸必须为9:16竖屏")
     try:
         with Image.open(source) as image:
             image.load()
             source_size = image.size
-            if image.size != (width, height):
+            if not _load_prompt_contract().valid_portrait_dimensions(*source_size):
                 raise ValueError(
-                    f"生成图片必须为原生{width}×{height}，禁止本地放大"
+                    "生成图片必须为9:16竖屏（允许1像素取整误差），禁止本地放大"
                 )
             normalized = image.convert("RGB")
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -967,7 +1000,7 @@ def validate_native_4k_image(
         "source_size": list(source_size),
         "source_sha256": _sha256(source),
         "source_path": str(source),
-        "target_size": [width, height],
+        "target_size": list(source_size),
         "sha256": _sha256(output),
     }
 
@@ -1486,7 +1519,7 @@ def next_action(
                         artifact,
                     )
                     issues = prompt_contract.validate_image_request(
-                        compiled_prompt, references, 2160, 3840
+                        compiled_prompt, references, None, None
                     )
                     if issues:
                         raise ValueError(
@@ -1513,16 +1546,15 @@ def next_action(
                     "output_path": str((process / raw_name).resolve()),
                     "reference_paths": references,
                     "attempt": state.image_failures.get(f"{video_id}:{artifact}", 0) + 1,
-                    "width": 2160,
-                    "height": 3840,
-                    "size": "2160x3840",
+                    "size": "auto",
+                    "aspect_ratio": "9:16",
                     "native_resolution_required": True,
                 }
                 if image_provider == "third_party_api":
                     action["api_config"] = dict(
                         state.approved_manifest["image_api_config"]
                     )
-                    action["request_parameters"] = {"width": 2160, "height": 3840}
+                    action["request_parameters"] = {"size": "auto"}
                 try:
                     if image_provider == "third_party_api":
                         return _reserve_image_api_action(batch_dir, state, action)
@@ -2211,7 +2243,11 @@ def run_local_until_gate(
     if failures:
         return _route_video_failures(batch_dir, state, failures)
     if polling:
-        action = {"kind": "VIDEO_POLL_PENDING", "video_ids": polling}
+        action = {"kind": "VIDEO_POLL_PENDING", "video_ids": polling,
+                  "next_poll_after_seconds": policy["autodl"]["poll_interval_seconds"],
+                  "progress": [{"video_id": video_id, **{key: _task_info(_find_item_dir(batch_dir, video_id)).get(key)
+                    for key in ("task_id", "remote_status", "elapsed_seconds", "last_query_at")}} for video_id in polling],
+                  "message": "视频正在服务端生成；等待后只查询已有任务，不重新提交。"}
         state.pending_action = action
         transition(state, "GENERATING", reason=f"继续轮询：{','.join(polling)}")
         save_state(batch_dir, state)

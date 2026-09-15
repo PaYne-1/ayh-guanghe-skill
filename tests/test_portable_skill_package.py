@@ -248,7 +248,7 @@ def test_native_4k_unattended_operator_contract_is_complete_and_not_appearance_d
     for phrase in (
         "产品参考图是唯一产品依据",
         "禁止用文字重新描述产品外观",
-        "原生2160×3840",
+        "渠道支持的原生分辨率",
         "禁止本地放大",
         "固定中远景",
         "非当前说话者嘴巴闭合且完全不发声",
@@ -367,7 +367,7 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
 
 
 def test_current_source_is_v1_7_with_low_cost_runtime_files():
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.6"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.7"
     for relative in (
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
@@ -416,7 +416,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
 
 
 def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.6.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.7.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -427,7 +427,7 @@ def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
             "product-video-pipeline/scripts/pipeline_runner.py",
         }
         assert required <= names
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.6"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.7"
         assert not any(
             name.endswith(".env")
             or name.endswith(".pyc")
@@ -456,7 +456,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "真实存在的绝对路径" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.6"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.7"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -470,11 +470,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "WAITING_USER_FEEDBACK" in skill
     assert "V02" in review
     assert "产品参考图是唯一产品依据" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.6"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.7"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.6.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.7.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -483,7 +483,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "product-video-pipeline/scripts/autodl_h3.py" in names
         assert "product-video-pipeline/references/autodl-h3.md" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.6"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.7"
         autodl = bundle.read("product-video-pipeline/references/autodl-h3.md").decode("utf-8")
         assert "first_frame" in autodl and "last_frame" in autodl
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
@@ -491,7 +491,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
 
 
 def test_v1_6_release_contains_seven_root_deliverables():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.6.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.7.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -499,7 +499,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
         assert "product-video-pipeline/VERSION" in names
         assert "product-video-pipeline/scripts/workflow_cli.py" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.6"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.7"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         for artifact in (
             "标题.txt",
@@ -514,7 +514,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
 
 
 def test_v1_6_1_release_contains_startup_communication_contract():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.6.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.7.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -525,7 +525,7 @@ def test_v1_6_1_release_contains_startup_communication_contract():
             name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
             for name in names
         )
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.6"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.7"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         startup = bundle.read(
             "product-video-pipeline/references/startup-checklist.md"
@@ -1395,7 +1395,7 @@ def test_every_video_requires_reasonable_4k_tail_first_last_workflow():
 
     assert "固定中远景" in skill
     assert "minimax_h3_lightx2v_v5_15s" in skill
-    assert "2160×3840" in workflow
+    assert "渠道支持的原生分辨率" in workflow
     assert "尾帧" in workflow
     assert "SHA-256 不同" in autodl
     assert "first_frame" in autodl and "last_frame" in autodl
@@ -2121,7 +2121,7 @@ def test_web_image_rejects_non_native_dimensions_without_resampling(tmp_path):
     runner = load_script("pipeline_runner.py")
     source = tmp_path / "square.png"
     Image.new("RGB", (1024, 1024), "white").save(source)
-    with pytest.raises(ValueError, match="原生2160×3840"):
+    with pytest.raises(ValueError, match="9:16"):
         runner.normalize_web_image(source, tmp_path / "normalized.png")
 
 
@@ -2215,11 +2215,13 @@ def test_next_image_action_is_compact_and_provider_specific(tmp_path, provider, 
         "output_path": str((process / "生图原始分镜.png").resolve()),
     }
     assert action["provider"] == provider
-    assert (action["width"], action["height"], action["size"]) == (2160, 3840, "2160x3840")
+    assert "width" not in action and "height" not in action
+    assert action["size"] == "auto"
+    assert action["aspect_ratio"] == "9:16"
     assert action["native_resolution_required"] is True
     if provider == "third_party_api":
         assert action["api_config"] == image_api_config
-        assert action["request_parameters"] == {"width": 2160, "height": 3840}
+        assert action["request_parameters"] == {"size": "auto"}
     else:
         assert "api_config" not in action
     assert "prompt" not in action
@@ -2818,7 +2820,10 @@ def test_run_local_poll_timeout_resumes_known_task_without_offering_paid_rerun(
 
     result = runner.run_local_until_gate(batch, state, policy)
 
-    assert result == {"kind": "VIDEO_POLL_PENDING", "video_ids": ["V001"]}
+    assert result["kind"] == "VIDEO_POLL_PENDING"
+    assert result["video_ids"] == ["V001"]
+    assert result["next_poll_after_seconds"] >= 20
+    assert result["progress"][0]["video_id"] == "V001"
     assert state.status == "GENERATING"
     assert state.pending_action == result
 

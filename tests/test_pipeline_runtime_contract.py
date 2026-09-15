@@ -425,7 +425,7 @@ def test_auth_preflight_and_raw_scheme(setup_batch, monkeypatch):
     )
     fake = module("autodl_h3")
     seen = []
-    monkeypatch.setattr(fake, "poll_task", lambda *a, **k: seen.append(k) or {"status": "poll_timeout"})
+    monkeypatch.setattr(fake, "query_task", lambda *a, **k: seen.append(k) or {"status": "running"})
     monkeypatch.setattr(runner, "_load_autodl", lambda: fake)
     runner._poll_item("task", "secret")
     assert seen[0]["auth_scheme"] == "raw"
@@ -728,7 +728,7 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.6.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.7.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}

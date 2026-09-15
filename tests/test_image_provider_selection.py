@@ -348,9 +348,9 @@ def test_native_4k_image_action_uses_compiled_prompt_and_exact_dimensions(
     )
 
     assert action["kind"] == kind
-    assert action["width"] == 2160
-    assert action["height"] == 3840
-    assert action["size"] == "2160x3840"
+    assert "width" not in action and "height" not in action
+    assert action["size"] == "auto"
+    assert action["aspect_ratio"] == "9:16"
     assert action["native_resolution_required"] is True
     assert Path(action["prompt_path"]).name == "分镜提交提示词.txt"
     prompt = Path(action["prompt_path"]).read_text(encoding="utf-8")
@@ -359,14 +359,14 @@ def test_native_4k_image_action_uses_compiled_prompt_and_exact_dimensions(
     assert action["reference_paths"]
     assert all(Path(path).is_file() for path in action["reference_paths"])
     if provider == "third_party_api":
-        assert action["request_parameters"] == {"width": 2160, "height": 3840}
+        assert action["request_parameters"] == {"size": "auto"}
     else:
         assert "request_parameters" not in action
 
 
 @pytest.mark.parametrize(
     ("dimensions", "passes"),
-    [((2160, 3840), True), ((1080, 1920), False), ((1152, 2048), False), ((3840, 2160), False)],
+    [((2160, 3840), True), ((1080, 1920), True), ((1152, 2048), True), ((941, 1672), True), ((3840, 2160), False), ((1024, 1536), False)],
 )
 def test_exact_image_dimensions_are_required_without_local_upscale(
     tmp_path, dimensions, passes
@@ -378,11 +378,11 @@ def test_exact_image_dimensions_are_required_without_local_upscale(
 
     if passes:
         result = runner.accept_generated_image(item, "分镜图.png", source)
-        assert result["size"] == [2160, 3840]
-        assert Image.open(item / "分镜图.png").size == (2160, 3840)
+        assert result["size"] == list(dimensions)
+        assert Image.open(item / "分镜图.png").size == dimensions
         return
 
-    with pytest.raises(ValueError, match="原生2160×3840|禁止本地放大"):
+    with pytest.raises(ValueError, match="9:16|禁止本地放大"):
         runner.accept_generated_image(item, "分镜图.png", source)
     candidate = item / "_工作文件" / "生成过程" / "分镜候选.png"
     assert not candidate.exists()
@@ -519,7 +519,7 @@ def test_provider_image_acceptance_uses_neutral_validation_audit_and_raw_evidenc
     ]) == 0
     failure = json.loads(capsys.readouterr().out)
     assert failure["kind"] == "IMAGE_FAILURE_RECORDED"
-    assert "生成图片必须为原生2160×3840" in failure["reason"]
+    assert "生成图片必须为9:16竖屏" in failure["reason"]
     assert "GPT 网页" not in failure["reason"]
 
 

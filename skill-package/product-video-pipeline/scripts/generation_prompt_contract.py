@@ -101,7 +101,13 @@ PRODUCT_REFERENCE_BLOCK = """【产品参考锁定】
 禁止重新设计、补画、删减、替换或推测任何产品部件。不要用文字重新描述产品的颜色、形状、材质或部件外观。"""
 
 NATIVE_4K_BLOCK = """【原生输出参数】
-直接生成原生2160×3840竖屏图，9:16；最大边3840px；宽高均为16px整数倍；总像素8,294,400。禁止先生成小图再放大。"""
+使用渠道支持的原生分辨率生成9:16竖屏图，不强制4K。禁止本地放大、拉伸或裁剪冒充原生输出。"""
+
+
+def valid_portrait_dimensions(width, height):
+    """Allow at most one width pixel of rounding for native 9:16 output."""
+    return (type(width) is int and type(height) is int and width > 0 and height > width
+            and abs(width * 16 - height * 9) <= 16)
 
 VIDEO_VISUAL_BLOCK = """【固定画面规则】
 0–15秒全程一个连续镜头，固定中远景，禁止切镜、跳切或转场。
@@ -187,8 +193,8 @@ def validate_image_request(
     if PRODUCT_REFERENCE_BLOCK not in text:
         issues.append("image.reference_lock_missing")
     if NATIVE_4K_BLOCK not in text:
-        issues.append("image.native_4k_missing")
-    if (width, height) != IMAGE_SIZE:
+        issues.append("image.native_resolution_missing")
+    if (width, height) != (None, None) and not valid_portrait_dimensions(width, height):
         issues.append("image.dimensions_invalid")
     return issues
 
