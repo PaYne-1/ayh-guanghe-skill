@@ -16,7 +16,7 @@ def test_poll_returns_running_status_without_blocking_loop(monkeypatch):
     assert calls[0][1]['timeout'] <= 20
     assert result['status'] == 'poll_timeout'
     assert result['remote_status'] == 'running'
-    assert result['next_poll_after_seconds'] >= 20
+    assert result['next_poll_after_seconds'] == 60
 
 
 def test_native_prompt_does_not_demand_4k():
@@ -69,7 +69,35 @@ def test_transient_query_failures_stop_after_five_attempts(tmp_path, monkeypatch
     state = runner.RunnerState(schema_version=1, policy_digest='test', status='GENERATING')
     for index in range(5):
         result = runner._run_autodl_locked(tmp_path, item, state, api_key=None)
-        now[0] += 30
+        now[0] += 61
     assert result['status'] == 'RECONCILIATION_REQUIRED'
     assert result['task_id'] == 'existing'
     assert runner._task_info(item)['query_error_count'] == 5
+
+
+def test_first_query_waits_five_minutes_then_one_minute(tmp_path, monkeypatch):
+    runner = load_script('pipeline_runner.py')
+    item = tmp_path / 'V001_test'
+    now = [1000.0]
+    monkeypatch.setattr(runner.time, 'time', lambda: now[0])
+    runner._persist_submission_response(item, {}, {'task_id': 'existing', 'request_hash': 'fake'})
+    calls = []
+    monkeypatch.setattr(runner, '_poll_item', lambda *a: calls.append(now[0]) or {
+        'status': 'poll_timeout', 'remote_status': 'running'})
+    monkeypatch.setattr(runner, '_submit_item', lambda *a, **k: (_ for _ in ()).throw(AssertionError('resubmit')))
+    state = runner.RunnerState(schema_version=1, policy_digest='test', status='GENERATING')
+    for timestamp, remaining in [(1000, 300), (1299, 1)]:
+        now[0] = timestamp
+        result = runner._run_autodl_locked(tmp_path, item, state, api_key=None)
+        assert result['next_poll_after_seconds'] == remaining
+        assert calls == []
+    now[0] = 1300
+    runner._run_autodl_locked(tmp_path, item, state, api_key=None)
+    assert calls == [1300]
+    assert runner._task_info(item)['next_poll_at'] == 1360
+    now[0] = 1359
+    runner._run_autodl_locked(tmp_path, item, state, api_key=None)
+    assert calls == [1300]
+    now[0] = 1360
+    runner._run_autodl_locked(tmp_path, item, state, api_key=None)
+    assert calls == [1300, 1360]

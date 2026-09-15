@@ -15,6 +15,8 @@ def command(env, capsys, *args, expected=0):
 
 def provider(env, monkeypatch):
     runner, _, _, _, _ = env
+    # These tests cover review/recovery; scheduling boundaries have dedicated clock tests.
+    monkeypatch.setattr(runner, "FIRST_VIDEO_POLL_DELAY_SECONDS", 0)
     posts = []
     monkeypatch.setenv("AUTODL_API_KEY", "offline")
 

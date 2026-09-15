@@ -24,6 +24,8 @@ from typing import Any, Optional
 from PIL import Image
 
 STATE_FILENAME = "流水线状态.json"
+FIRST_VIDEO_POLL_DELAY_SECONDS = 300
+VIDEO_POLL_INTERVAL_SECONDS = 60
 VALID_STATES = {
     "WAITING_START_APPROVAL",
     "RUNNING_AUTOMATICALLY",
@@ -371,6 +373,7 @@ def _persist_submission_response(
     submitted: dict[str, object],
 ) -> dict[str, object]:
     response_info = dict(info)
+    submitted_at = time.time()
     response_info.update(
         {
             "task_id": submitted["task_id"],
@@ -378,6 +381,8 @@ def _persist_submission_response(
             "request_hash": submitted["request_hash"],
             "submission_pending": True,
             "status": "SUBMISSION_RESPONSE_PENDING_RECORD",
+            "poll_started_at": submitted_at,
+            "next_poll_at": submitted_at + FIRST_VIDEO_POLL_DELAY_SECONDS,
         }
     )
     _write_task_info(item_dir, response_info)
@@ -449,14 +454,14 @@ def _poll_item(task_id: str, api_key: Optional[str]) -> dict[str, object]:
                     "http_status": int(http.group(1)),
                     "reason": "查询被拒绝，请核对鉴权与已有任务；禁止重新提交。"}
         return {"status": "poll_timeout", "remote_status": "query_unavailable",
-                "next_poll_after_seconds": policy["autodl"]["poll_interval_seconds"]}
+                "next_poll_after_seconds": VIDEO_POLL_INTERVAL_SECONDS}
     status = autodl.task_status(response)
     result: dict[str, object] = {"status": status, "response": response}
     if status in {"success", "succeeded", "completed"}:
         result["url"] = autodl.first_result_url(response)
     elif status not in {"failed", "cancelled", "canceled"}:
         result.update(status="poll_timeout", remote_status=status,
-                      next_poll_after_seconds=policy["autodl"]["poll_interval_seconds"])
+                      next_poll_after_seconds=VIDEO_POLL_INTERVAL_SECONDS)
     return result
 
 
@@ -931,7 +936,7 @@ def _run_autodl_locked(
     info.update(last_query_at=_now(), remote_status=polled.get("remote_status", polled["status"]),
                 elapsed_seconds=max(0, int(time.time() - info["poll_started_at"])))
     if polled["status"] == "poll_timeout":
-        info["next_poll_at"] = time.time() + polled.get("next_poll_after_seconds", 20)
+        info["next_poll_at"] = time.time() + VIDEO_POLL_INTERVAL_SECONDS
     else:
         info.pop("next_poll_at", None)
     _write_task_info(item_dir, info)
@@ -2246,7 +2251,9 @@ def run_local_until_gate(
         return _route_video_failures(batch_dir, state, failures)
     if polling:
         action = {"kind": "VIDEO_POLL_PENDING", "video_ids": polling,
-                  "next_poll_after_seconds": policy["autodl"]["poll_interval_seconds"],
+                  "next_poll_after_seconds": max(1, int(min(
+                      _task_info(_find_item_dir(batch_dir, video_id)).get("next_poll_at", time.time() + VIDEO_POLL_INTERVAL_SECONDS)
+                      for video_id in polling) - time.time() + 0.999)),
                   "progress": [{"video_id": video_id, **{key: _task_info(_find_item_dir(batch_dir, video_id)).get(key)
                     for key in ("task_id", "remote_status", "elapsed_seconds", "last_query_at")}} for video_id in polling],
                   "message": "视频正在服务端生成；等待后只查询已有任务，不重新提交。"}

@@ -482,6 +482,10 @@ def test_manifest_binds_payload_and_accounts_reservation_spend(setup_batch, caps
     assert sum(float(v["cost"]) for v in state.budget_ledger.values()) == 6
     assert {row["status"] for row in state.budget_ledger.values()} == {"spent"}
     assert (items[0] / "_工作文件/任务状态/AutoDL提交结果.json").is_file()
+    assert not (items[0] / "_工作文件/任务状态/查询结果.json").exists()
+    due_at = runner._task_info(items[0])["next_poll_at"]
+    monkeypatch.setattr(runner.time, "time", lambda: due_at)
+    runner.run_autodl_item(batch, items[0], state, api_key="offline")
     assert (items[0] / "_工作文件/任务状态/查询结果.json").is_file()
 
 
@@ -728,7 +732,7 @@ def test_retry_notice_is_not_an_unreserved_external_generation_action(setup_batc
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.8.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.9.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}

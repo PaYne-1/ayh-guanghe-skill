@@ -367,7 +367,7 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
 
 
 def test_current_source_is_v1_7_with_low_cost_runtime_files():
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.8"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.9"
     for relative in (
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
@@ -416,7 +416,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
 
 
 def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.8.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.9.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -427,7 +427,7 @@ def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
             "product-video-pipeline/scripts/pipeline_runner.py",
         }
         assert required <= names
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.8"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.9"
         assert not any(
             name.endswith(".env")
             or name.endswith(".pyc")
@@ -456,7 +456,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "真实存在的绝对路径" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.8"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.9"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -470,11 +470,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "WAITING_USER_FEEDBACK" in skill
     assert "V02" in review
     assert "产品参考图是唯一产品依据" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.8"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.9"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.8.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.9.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -483,7 +483,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "product-video-pipeline/scripts/autodl_h3.py" in names
         assert "product-video-pipeline/references/autodl-h3.md" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.8"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.9"
         autodl = bundle.read("product-video-pipeline/references/autodl-h3.md").decode("utf-8")
         assert "first_frame" in autodl and "last_frame" in autodl
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
@@ -491,7 +491,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
 
 
 def test_v1_6_release_contains_seven_root_deliverables():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.8.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.9.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -499,7 +499,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
         assert "product-video-pipeline/VERSION" in names
         assert "product-video-pipeline/scripts/workflow_cli.py" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.8"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.9"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         for artifact in (
             "标题.txt",
@@ -514,7 +514,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
 
 
 def test_v1_6_1_release_contains_startup_communication_contract():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.8.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.9.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -525,7 +525,7 @@ def test_v1_6_1_release_contains_startup_communication_contract():
             name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
             for name in names
         )
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.8"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.9"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         startup = bundle.read(
             "product-video-pipeline/references/startup-checklist.md"
@@ -2295,6 +2295,10 @@ def test_runner_poll_and_download_do_not_increment_model_calls(tmp_path, monkeyp
 
     result = runner.run_autodl_item(batch, item, state, api_key="test", dry_run=False)
 
+    assert result["status"] == "poll_timeout"
+    due_at = runner._task_info(item)["next_poll_at"]
+    monkeypatch.setattr(runner.time, "time", lambda: due_at)
+    result = runner.run_autodl_item(batch, item, state, api_key="test", dry_run=False)
     assert result["ok"] is True
     assert state.model_calls_by_video["V001"] == 2
     recorded = json.loads((state_dir / "任务信息.json").read_text(encoding="utf-8"))
