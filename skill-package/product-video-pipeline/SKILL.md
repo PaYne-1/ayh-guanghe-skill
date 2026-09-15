@@ -59,6 +59,8 @@ python scripts/workflow_cli.py init `
 
 ## 产出与路径
 
+原生口播由编译器使用H3说话人及<d>[Chinese]台词</d>格式，交接与片尾默认预留0.4秒零人声，过长台词先精简再提交。交付audio_review默认pending_listening，必须真实完整试听后才记录passed/failed，不能把解码通过当口播通过。无音频听辨能力时请用户试听，不伪造结论；详细操作见[交付契约](references/delivery-contract.md)。
+
 `VIDEO_POLL_PENDING` 表示任务已在服务端生成，不是重新生成请求。展示 `progress` 中的视频编号、任务 ID、服务端状态、累计等待秒数和最后查询时间；按 `next_poll_after_seconds` 等待后再运行 `run-local`。不要紧密循环读取文件或反复重启查询，不重新提交已有任务。宿主支持持续工具等待时，等待期间至少每60秒给一次简短进度；宿主不能持续执行时明确告知当前任务仍在服务端处理，不能假装后台持续监控。下载、解码、失败恢复仍保留必要技术校验。
 
 单条任务第一级只保留 `标题.txt`、`发布正文.txt`、`话题标签.txt`、`分镜图.png`、`尾帧图.png`、`封面图.png`、按发布标题清洗命名的 `.mp4` 和 `_工作文件`。过程文件按 `_工作文件/任务状态`、`_工作文件/生成过程`、`_工作文件/验收记录`、`_工作文件/历史版本` 分类。学习模式和 V02 只有 `review-output` 记录明确 `passed` 事件并由 `audit-outputs` 复核后，才可保留一级文件；没有明确通过不得保留一级文件。自动 V01 只按新的技术交付合同例外：技术证据和交付哈希有效时交付并等待反馈，不把 `WAITING_USER_FEEDBACK` 伪装为 `COMPLETED`。所有新视频固定使用 `minimax_h3_lightx2v_v5_15s`。

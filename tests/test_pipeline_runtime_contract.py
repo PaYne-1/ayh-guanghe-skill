@@ -40,7 +40,7 @@ def package(video_id):
         "publish_title": "爸妈也能轻松上手的电动轮椅到底怎么样", "cover_title": "爸妈会操作",
         "people": [{"id": "P1", "identity": "老人", "gender": "女", "age_feel": "70岁", "position": "左侧", "action": "坐轮椅", "speaks": True}, {"id": "P2", "identity": "家属", "gender": "女", "age_feel": "40岁", "position": "右侧", "action": "提问", "speaks": True}],
         "storyboard_people": ["P1", "P2"],
-        "script_segments": [{"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"}, {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"}, {"start": 11, "end": 15, "speaker_id": "P2", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"}],
+        "script_segments": [{"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"}, {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"}, {"start": 11, "end": 15, "speaker_id": "P2", "dialogue": "用了爱优护电动轮椅后，更方便，可以了解。"}],
         "storyboard_prompt": "竖屏9:16，两位女性始终同框，不要文字。", "last_frame_prompt": "合理尾帧，主体前进1至1.5米，人物产品一致。",
         "video_prompt": "一镜到底，固定机位，完整双人对话口播，不要背景音乐。",
         "publish_body": "以前老人总担心操作复杂，家里人每次都要陪在旁边。用了爱优护电动轮椅后，老人自己很快就能上手，平时在小区出门顺手多了，家属照顾也省心。有同样出门需求的家庭，可以了解一下爱优护电动轮椅。",
@@ -742,7 +742,7 @@ def test_motion_record_must_bind_current_storyboard(setup_batch, capsys):
 
 
 def test_release_source_parity_and_security():
-    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.11.zip") as archive:
+    with zipfile.ZipFile(ROOT / "release/product-video-pipeline-v1.8.12.zip") as archive:
         names = archive.namelist()
         tracked = subprocess.run(["git", "-c", "core.quotePath=false", "ls-files", "--", "skill-package/product-video-pipeline"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8").stdout.splitlines()
         expected = {"product-video-pipeline/" + path.split("skill-package/product-video-pipeline/", 1)[1] for path in tracked}

@@ -268,6 +268,10 @@ def test_auto_delivery_promotes_v01_and_returns_verified_absolute_root_video(
     assert video.name == workflow.deliverable_root_path(item_path, "视频.mp4").name
     assert runner._sha256(video) == row["sha256"] == row["technical"]["sha256"]
     assert row["status"] == "V01 已下载，等待用户反馈"
+    assert row["audio_review"]["status"] == "pending_listening"
+    audio = runner._load_audio_review()
+    audio.record_review(Path(row["audio_review"]["report_path"]), video, "failed", "offline-test-reviewer", "交接处额外人声", True)
+    assert runner._load_auto_delivery(batch, runner.load_or_create_state(batch, policy))["items"][0]["audio_review"]["status"] == "failed"
     assert row["video_cost_yuan"] == "3.00"
     assert row["image_cost_yuan"] == ("0" if provider == "gpt_web" else "0.60")
     assert runner.load_or_create_state(batch, policy).status == "WAITING_USER_FEEDBACK"

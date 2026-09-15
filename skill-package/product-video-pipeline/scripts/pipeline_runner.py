@@ -176,6 +176,13 @@ def _load_prompt_contract():
     return module
 
 
+def _load_audio_review():
+    spec = importlib.util.spec_from_file_location("product_video_audio_review", Path(__file__).with_name("audio_review.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _state_path(batch_dir: Path) -> Path:
     return batch_dir / STATE_FILENAME
 
@@ -1883,6 +1890,7 @@ def _delivery_row(item: Path, state: RunnerState) -> dict[str, object]:
             "has_audio": True,
             "sha256": digest,
         },
+        "audio_review": _audio_review_for_delivery(item, expected),
         "video_cost_yuan": str(video_cost),
         "image_cost_yuan": str(image_cost) if image_cost is not None else None,
         "budget_scope": "video_only",
@@ -1890,6 +1898,18 @@ def _delivery_row(item: Path, state: RunnerState) -> dict[str, object]:
         "sha256": digest,
         "status": "V01 已下载，等待用户反馈",
     }
+
+
+def _audio_review_for_delivery(item, video):
+    module = _load_audio_review()
+    content_path = item / "_工作文件/生成过程/策划内容.json"
+    try:
+        segments = json.loads(content_path.read_text(encoding="utf-8")).get("script_segments", [])
+    except (OSError, ValueError, AttributeError):
+        segments = []
+    report = item / "_工作文件/验收记录/音频试听.json"
+    module.prepare_review(report, video, segments)
+    return module.review_status(report, video)
 
 
 def _load_auto_delivery(batch: Path, state: RunnerState) -> dict[str, object]:
@@ -1901,10 +1921,12 @@ def _load_auto_delivery(batch: Path, state: RunnerState) -> dict[str, object]:
     if not isinstance(rows, list):
         raise ValueError("批次 V01 交付项目必须是列表")
     current = [_delivery_row(item, state) for item in _video_items(batch)]
-    comparable = current
+    # Listening receipts evolve after delivery and are freshly verified separately.
+    rows = [{k: v for k, v in row.items() if k != "audio_review"} if isinstance(row, dict) else row for row in rows]
+    comparable = [{k: v for k, v in row.items() if k != "audio_review"} for row in current]
     if rows and all(isinstance(row, dict) and "budget_scope" not in row for row in rows):
         comparable = [{k: v for k, v in row.items() if k not in {"budget_scope", "cost_notice"}}
-                      for row in current]
+                      for row in comparable]
     if rows != comparable:
         raise ValueError("批次 V01 交付记录与当前文件、技术证据或费用记录不一致")
     return {"kind": "V01_DELIVERED", "status": "WAITING_USER_FEEDBACK", "items": current}

@@ -263,6 +263,8 @@ def _validated_segments(
         if previous_speaker == speaker:
             raise ValueError("视频时间段必须严格交替说话")
         cleaned_dialogue = _clean_text(dialogue, "dialogue")
+        if any(mark in cleaned_dialogue for mark in ("<", ">", "\n", "\r")):
+            raise ValueError("台词只能包含实际口播文字，不得包含语音标记或换行")
         if any(existing[3] == cleaned_dialogue for existing in prepared):
             raise ValueError("视频台词不得重复")
         prepared.append((float(start), float(end), speaker, cleaned_dialogue))
@@ -275,14 +277,36 @@ def _format_second(value: float) -> str:
     return str(int(value)) if value.is_integer() else str(value)
 
 
+def audio_schedule(segments):
+    ids = tuple(sorted({s["speaker_id"] for s in segments}))
+    prepared = _validated_segments(segments, ids)
+    result = []
+    for index, (start, end, speaker, dialogue) in enumerate(prepared):
+        next_start = prepared[index + 1][0] if index + 1 < len(prepared) else 15.0
+        speech_end = round(min(end, next_start - 0.4), 3)
+        if speech_end <= start:
+            raise ValueError("台词时间段不足以保留交接静默")
+        if len(re.findall(r"[\u4e00-\u9fff]", dialogue)) > (speech_end - start) * 5 + 1e-6:
+            raise ValueError("台词过长，请先精简内容，不得压缩交接静默或加速抢读")
+        result.append({"start": start, "end": end, "speaker_id": speaker,
+                       "speech_end": speech_end, "silence_end": next_start})
+    return result
+
+
+def _silence_line(row):
+    return (f'{_format_second(row["speech_end"])}–{_format_second(row["silence_end"])}秒：双方闭嘴，零人声；'
+            "不出现气声、含混语音或附和。")
+
+
 def visual_instruction_issues(text: str, segments=(), motion_record=None) -> list[str]:
     """Conservative lexical checks; not a claim of full semantic verification."""
     scene = _without_contract_blocks(text, (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK))
+    scene = scene.replace("integrated_multimodal_description: [Shot 1] ", "")
     for segment in segments:
         if isinstance(segment, Mapping) and isinstance(segment.get("dialogue"), str):
             # Exclude only a complete generated dialogue line, never matching scene prose.
-            line_pattern = (r"(?m)^\d+(?:\.\d+)?–\d+(?:\.\d+)?秒 speaker_id=[^（\n]+（[^）\n]+）："
-                            + re.escape(segment["dialogue"]) + r"$")
+            line_pattern = (r"(?m)^\d+(?:\.\d+)?–\d+(?:\.\d+)?秒 speaker_id=[^（\n]+（[^）\n]+） \(S\d+\) [^\n<]+<d>\[Chinese\]"
+                            + re.escape(segment["dialogue"]) + r"</d>$")
             scene = re.sub(line_pattern, "", scene)
     allowed = []
     if motion_record is not None:
@@ -325,22 +349,33 @@ def compile_video_prompt(
         _clean_text(base_prompt, "base_prompt"),
         (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK),
     )
+    if any(marker in scene for marker in ("<d", "</d", "integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:")):
+        raise ValueError("video_prompt不得预先包装H3语音标记，由编译器统一包装一次")
     _reject_product_appearance(scene)
     conflicts = visual_instruction_issues(scene, (), motion_record)
     if conflicts:
         raise ValueError("视频指令冲突：" + ",".join(conflicts))
     person_ids, person_identities = _person_profiles(people)
     validated_segments = _validated_segments(segments, person_ids)
-    dialogue_lines = [
-        f"{_format_second(start)}–{_format_second(end)}秒 speaker_id={speaker}（{person_identities[speaker]}）：{dialogue}"
-        for start, end, speaker, dialogue in validated_segments
-    ]
+    schedule = audio_schedule(segments)
+    speaker_labels = {identifier: f"S{index + 1}" for index, identifier in enumerate(sorted(person_ids))}
+    dialogue_lines = []
+    if schedule[0]["start"] > 0:
+        dialogue_lines.append(f'0–{_format_second(schedule[0]["start"])}秒：双方闭嘴，零人声。')
+    for (start, end, speaker, dialogue), row in zip(validated_segments, schedule):
+        dialogue_lines.append(
+            f'{_format_second(start)}–{_format_second(end)}秒 speaker_id={speaker}（{person_identities[speaker]}） ({speaker_labels[speaker]}) '
+            f'在{_format_second(start)}–{_format_second(row["speech_end"])}秒自然说出：<d>[Chinese]{dialogue}</d>')
+        dialogue_lines.append(_silence_line(row))
     return "\n\n".join((
-        scene,
+        "How the reference pictures align with the target video: Picture 1 anchors 0.00 seconds; Picture 2 anchors 15.00 seconds. Both belong to Shot 1.",
+        "integrated_multimodal_description: [Shot 1] " + scene,
         PRODUCT_REFERENCE_BLOCK,
         VIDEO_VISUAL_BLOCK,
         VIDEO_AUDIO_BLOCK,
         "【逐句台词】\n" + "\n".join(dialogue_lines),
+        "overall_soundscape: Quiet non-vocal room tone only. Speech pauses contain no human vocalization, breathing, laughter or babble.",
+        "non_diegetic_music: N/A",
     ))
 
 
@@ -389,6 +424,25 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]], motio
         return issues
     if any(text.count(dialogue) != 1 for dialogue in dialogues):
         issues.append("video.dialogue_exactly_once")
+    if (re.findall(r"<d>\[Chinese\]([^<>\n]+)</d>", text) != dialogues
+            or text.count("<d>") != len(dialogues) or text.count("</d>") != len(dialogues)):
+        issues.append("video.dialogue_markup_invalid")
+    if any(text.count(field) != 1 for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:")):
+        issues.append("video.audio_structure_invalid")
+    try:
+        speaker_labels = {identifier: f"S{index + 1}" for index, identifier in enumerate(sorted({s["speaker_id"] for s in segments}))}
+        for row, segment in zip(audio_schedule(segments), segments):
+            binding_pattern = (
+                r"(?m)^" + re.escape(f'{_format_second(row["start"])}–{_format_second(row["end"])}秒 speaker_id={row["speaker_id"]}（')
+                + r"[^）\n]+） " + re.escape(f'({speaker_labels[row["speaker_id"]]}) 在{_format_second(row["start"])}–{_format_second(row["speech_end"])}秒自然说出：<d>[Chinese]{segment["dialogue"]}</d>') + r"$")
+            if not re.search(binding_pattern, text):
+                issues.append("video.dialogue_binding_invalid")
+                break
+            if _silence_line(row) not in text:
+                issues.append("video.handoff_silence_missing")
+                break
+    except (ValueError, KeyError, TypeError):
+        issues.append("video.audio_timing_invalid")
     for segment in segments:
         if not isinstance(segment, Mapping):
             continue
@@ -408,7 +462,9 @@ def validate_video_request(prompt: str, segments: list[dict[str, object]], motio
             f"{_format_second(float(start))}–{_format_second(float(end))}秒 "
             f"speaker_id={speaker}（"
         )
-        if binding not in text:
+        speaker_ids = sorted({s.get("speaker_id") for s in segments if isinstance(s, Mapping) and isinstance(s.get("speaker_id"), str)})
+        label = f"S{speaker_ids.index(speaker) + 1}"
+        if not re.search(re.escape(binding) + r"[^）\n]+） \(" + label + r"\)", text):
             issues.append("video.speaker_identity_missing")
             break
     return issues

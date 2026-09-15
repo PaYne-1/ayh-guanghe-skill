@@ -367,7 +367,7 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
 
 
 def test_current_source_is_v1_7_with_low_cost_runtime_files():
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.11"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
     for relative in (
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
@@ -416,7 +416,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
 
 
 def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.11.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -427,7 +427,7 @@ def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
             "product-video-pipeline/scripts/pipeline_runner.py",
         }
         assert required <= names
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.11"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
         assert not any(
             name.endswith(".env")
             or name.endswith(".pyc")
@@ -456,7 +456,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "真实存在的绝对路径" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.11"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -470,11 +470,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "WAITING_USER_FEEDBACK" in skill
     assert "V02" in review
     assert "产品参考图是唯一产品依据" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.11"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.11.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -483,7 +483,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "product-video-pipeline/scripts/autodl_h3.py" in names
         assert "product-video-pipeline/references/autodl-h3.md" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.11"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
         autodl = bundle.read("product-video-pipeline/references/autodl-h3.md").decode("utf-8")
         assert "first_frame" in autodl and "last_frame" in autodl
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
@@ -491,7 +491,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
 
 
 def test_v1_6_release_contains_seven_root_deliverables():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.11.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -499,7 +499,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
         assert "product-video-pipeline/VERSION" in names
         assert "product-video-pipeline/scripts/workflow_cli.py" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.11"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         for artifact in (
             "标题.txt",
@@ -514,7 +514,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
 
 
 def test_v1_6_1_release_contains_startup_communication_contract():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.11.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -525,7 +525,7 @@ def test_v1_6_1_release_contains_startup_communication_contract():
             name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
             for name in names
         )
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.11"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         startup = bundle.read(
             "product-video-pipeline/references/startup-checklist.md"
@@ -1150,7 +1150,7 @@ def test_content_validator_enforces_confirmed_ayh_contract():
         "script_segments": [
             {"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"},
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"},
-            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，更方便，可以了解。"},
         ],
         "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",
         "last_frame_prompt": "同尺寸合理尾帧，产品保持原位，产品结构和人物保持一致。",
@@ -1187,7 +1187,7 @@ def test_content_paths_keep_deliverables_at_root_and_process_files_nested(tmp_pa
         "script_segments": [
             {"start": 0, "end": 4, "speaker_id": "P2", "dialogue": "这个操作会不会很难？"},
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "操作很顺手，我自己就能开，家里人也省心。"},
-            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解一下。"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后，更方便，可以了解。"},
         ],
         "storyboard_prompt": "竖屏4K，2160×3840，9:16，两位女性始终同框。",
         "last_frame_prompt": "同尺寸合理尾帧，主体继续前进约1至1.5米。",
@@ -3111,7 +3111,7 @@ def test_runner_happy_path_promotes_seven_outputs_and_completes(
                     "start": 11,
                     "end": 15,
                     "speaker_id": "P2",
-                    "dialogue": "用了爱优护电动轮椅后，出门更方便，可以了解。",
+                    "dialogue": "用了爱优护电动轮椅后，更方便，可以了解。",
             },
         ],
         "storyboard_prompt": "竖屏9:16，固定正侧45度角，两位女性始终同框，不要任何文字。",

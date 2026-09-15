@@ -300,7 +300,7 @@ def test_video_contract_rejects_inferred_appearance(contract, people, segments):
 def test_video_contract_allows_component_action_and_reference_lock(
     contract, people, segments, scene
 ):
-    assert contract.compile_video_prompt(scene, people, segments).startswith(scene)
+    assert "integrated_multimodal_description: [Shot 1] " + scene in contract.compile_video_prompt(scene, people, segments)
 
 
 @pytest.mark.parametrize(

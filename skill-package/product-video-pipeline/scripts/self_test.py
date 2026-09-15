@@ -377,7 +377,7 @@ def main() -> int:
         "script_segments": [
             {"start": 0, "end": 4, "speaker_id": "P1", "dialogue": "开场"},
             {"start": 4, "end": 11, "speaker_id": "P1", "dialogue": "回答"},
-            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后出门更方便，可以选择"},
+            {"start": 11, "end": 15, "speaker_id": "P1", "dialogue": "用了爱优护电动轮椅后更方便，可以选择"},
         ],
         "storyboard_prompt": "渠道支持的原生分辨率，固定中远景，老人和陪护者与完整产品处于安全区",
         "last_frame_prompt": "渠道支持的原生分辨率，固定中远景，连续前进后的合理尾帧",
