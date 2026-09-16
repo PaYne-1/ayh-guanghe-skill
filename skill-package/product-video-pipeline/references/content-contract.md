@@ -4,6 +4,8 @@
 
 ## 必填字段
 
+新生成的策划额外写入`"video_prompt_style": "reference_wide_v1"`，按[多图全景口播模板](reference-wide-dialogue.md)生成简短场景与人物映射。此为助手内部字段，不向用户索取；缺少该字段的历史策划仍用旧编译器。不要选择历史实验`compact_v1`，其中“依次只说下列三句”等说明曾被模型读出口播。
+
 `video_id`、`selling_point`、`publish_title`、`cover_title`、`people`、`storyboard_people`、`script_segments`、`storyboard_prompt`、`last_frame_prompt`、`video_prompt`、`publish_body`、`hashtags` 必须齐全。`people` 恰好为老人和一名陪护者/家属两个不同 ID，二人全程在画面内；`script_segments` 按时间递增覆盖 0–15 秒。
 
 ```json

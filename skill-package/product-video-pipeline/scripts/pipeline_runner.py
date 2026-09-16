@@ -1351,6 +1351,27 @@ def prepare_payload(batch: Path, item: Path, state: RunnerState) -> Path:
     )
     if issues:
         raise ValueError("视频提交提示词预检失败：" + ",".join(issues))
+    prompt_style = package.get("video_prompt_style", "standard")
+    if prompt_style not in {"standard", "compact_v1", "reference_wide_v1"}:
+        raise ValueError("未知视频提示词格式")
+    if prompt_style == "compact_v1":
+        compiled = prompt_contract.compile_compact_video_prompt(
+            str(package["video_prompt"]), list(package["people"]),
+            list(package["script_segments"]), motion_record)
+        issues = prompt_contract.validate_compact_video_request(
+            compiled, str(package["video_prompt"]), list(package["people"]),
+            list(package["script_segments"]), motion_record)
+        if issues:
+            raise ValueError("简化视频提示词预检失败：" + ",".join(issues))
+    if prompt_style == "reference_wide_v1":
+        compiled = prompt_contract.compile_reference_wide_video_prompt(
+            str(package["video_prompt"]), list(package["people"]),
+            list(package["script_segments"]), motion_record)
+        issues = prompt_contract.validate_reference_wide_video_request(
+            compiled, str(package["video_prompt"]), list(package["people"]),
+            list(package["script_segments"]), motion_record)
+        if issues:
+            raise ValueError("全景视频提示词预检失败：" + ",".join(issues))
     key = _attempt_key(item)
     payload = {
         "prompt": compiled,
@@ -1594,7 +1615,7 @@ def next_action(
         category = "content_create" if not state.model_usage.get("content_create") else "content_correction"
         prompt_path = batch_dir / "_批次内容/内容任务.json"
         output = prompt_path.parent
-        _atomic_json(prompt_path, {"video_ids": missing_content, "tasks": [{"video_id": i, "selling_point": _task_info(_find_item_dir(batch_dir, i)).get("selling_point"), "validation_errors": state.item_failures.get(i)} for i in missing_content], "content_contract": str((Path(__file__).resolve().parents[1] / "references/content-contract.md").resolve())})
+        _atomic_json(prompt_path, {"video_ids": missing_content, "video_prompt_style": "reference_wide_v1", "tasks": [{"video_id": i, "selling_point": _task_info(_find_item_dir(batch_dir, i)).get("selling_point"), "validation_errors": state.item_failures.get(i)} for i in missing_content], "content_contract": str((Path(__file__).resolve().parents[1] / "references/content-contract.md").resolve())})
         action = {"kind": "BATCH_CONTENT_REQUIRED", "purpose": category, "video_ids": missing_content, "output_dir": str(output.resolve()), "prompt_path": str(prompt_path.resolve())}
         try:
             return _reserve_action(batch_dir, state, policy, action, category)

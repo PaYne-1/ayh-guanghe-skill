@@ -379,6 +379,121 @@ def compile_video_prompt(
     ))
 
 
+def compile_compact_video_prompt(base_prompt, people, segments, motion_record=None):
+    """Opt-in trial: validate source normally, then render one canonical short form."""
+    standard = compile_video_prompt(base_prompt, people, segments, motion_record)
+    issues = validate_video_request(standard, segments, motion_record)
+    if issues:
+        raise ValueError("视频合同校验失败：" + ",".join(issues))
+    scene = _without_contract_blocks(base_prompt.strip(),
+        (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK))
+    ids, identities = _person_profiles(people)
+    labels = {identifier: f"S{index + 1}" for index, identifier in enumerate(sorted(ids))}
+    roles = "；".join(f"({labels[i]})是{identities[i]}，使用与身份一致的固定普通话声线" for i in sorted(ids))
+    lines = []
+    schedule = audio_schedule(segments)
+    if schedule[0]['start'] > 0:
+        lines.append(f"0–{_format_second(schedule[0]['start'])}秒双方闭嘴，无人声。")
+    for row, segment in zip(schedule, segments):
+        lines.append(f"{_format_second(row['start'])}–{_format_second(row['speech_end'])}秒 "
+                     f"({labels[row['speaker_id']]})自然说：<d>[Chinese]{segment['dialogue']}</d>")
+        lines.append(f"{_format_second(row['speech_end'])}–{_format_second(row['silence_end'])}秒双方闭嘴，无人声。")
+    return "\n\n".join((
+        "How the reference pictures align with the target video: Picture 1 is the first frame; Picture 2 is the final frame of the same shot.",
+        "integrated_multimodal_description: [Shot 1] " + scene,
+        "产品参考图是唯一产品依据；产品结构、部件、比例和外观保持参考图不变，不重新设计。"
+        "分镜图是全程唯一画面基准；0–15秒一镜到底，固定机位、固定中远景。"
+        "背景、构图、光线、人物身份与服装、产品数量保持不变，人物全身和产品整体始终完整位于画面安全区。"
+        "只允许说话口型、自然微表情及已确认的产品运动；未指定则保持原位。"
+        "尾帧仅延续同一画面的动作结束状态，不切镜、不运镜、不换景。",
+        roles + "。完整双人对话口播；依次只说下列三句，台词与口型同步。"
+        "非当前说话者嘴巴闭合且完全不发声；清单之外零人声，无旁白、无背景音乐。",
+        "\n".join(lines),
+        "overall_soundscape: Only the specified Chinese dialogue, with silence between turns.",
+        "non_diegetic_music: N/A",
+    ))
+
+
+def validate_compact_video_request(prompt, base_prompt, people, segments, motion_record=None):
+    """Exact recompilation rejects added speech, altered timing and missing locks."""
+    try:
+        expected = compile_compact_video_prompt(base_prompt, people, segments, motion_record)
+    except (ValueError, TypeError, KeyError):
+        return ["video.compact_source_invalid"]
+    return [] if prompt == expected else ["video.compact_request_mismatch"]
+
+
+def compile_reference_wide_video_prompt(base_prompt, people, segments, motion_record=None):
+    """Portable version of the user-accepted wide-view/turn-bound experiment.
+
+    Input safety is checked before rendering; output wording is an instruction,
+    not a claim that reference-image APIs enforce camera or endpoint constraints.
+    """
+    standard = compile_video_prompt(base_prompt, people, segments, motion_record)
+    issues = validate_video_request(standard, segments, motion_record)
+    if issues:
+        raise ValueError('视频合同校验失败：' + ','.join(issues))
+    ids, identities = _person_profiles(people)
+    labels = {identifier: f'S{index + 1}' for index, identifier in enumerate(sorted(ids))}
+    roles, voices = {}, []
+    for person in people:
+        identifier = person['id'].strip()
+        role = _clean_text(person.get('video_role', identities[identifier]), 'video_role')
+        voice = _clean_text(person.get('video_voice', 'a consistent natural Mandarin voice matching the person in the reference'), 'video_voice')
+        for value in (role, voice):
+            if (any(mark in value for mark in ('<', '>', '\n', '\r', '[Shot', 'integrated_multimodal_description:', 'overall_soundscape:', 'non_diegetic_music:'))
+                    or _has_positive_extra_voice_permission(value)
+                    or any(s['dialogue'] in value for s in segments)):
+                raise ValueError('人物映射只填写身份或声线，不得包含台词、指令包装或额外人声')
+            _reject_product_appearance(value)
+            if visual_instruction_issues(value, (), None):
+                raise ValueError('人物映射不得夹带运镜或产品动作指令')
+        roles[identifier] = role
+        voices.append(f'{role} ({labels[identifier]}) uses {voice}.')
+    scene = _without_contract_blocks(base_prompt.strip(),
+        (PRODUCT_REFERENCE_BLOCK, VIDEO_VISUAL_BLOCK, VIDEO_AUDIO_BLOCK))
+    # Source already includes any authorized motion; do not invent or duplicate it.
+    motion = ('Any specified product movement stays within the wide composition with the complete product visible. '
+              if motion_record else 'The product remains in its reference position. ')
+    lines = []
+    schedule = audio_schedule(segments)
+    if schedule[0]['start'] > 0:
+        lines.append(f"0-{schedule[0]['start']:g}s: Both people have closed lips and remain silent.")
+    for row, segment in zip(schedule, segments):
+        speaker = segment['speaker_id']
+        listener = next(identifier for identifier in ids if identifier != speaker)
+        lines.append(f"{row['start']:g}-{row['speech_end']:g}s: {roles[listener]} keeps their lips closed and listens silently. "
+                     f"{roles[speaker]} ({labels[speaker]}) says once: <d>[Chinese]{segment['dialogue']}</d>")
+        lines.append(f"{row['speech_end']:g}-{row['silence_end']:g}s: Both people have closed lips and remain silent.")
+    prompt = '\n\n'.join((
+        'Pictures 1 and 2 are composition references for the same continuous scene. '
+        'Use Picture 1 as the visual layout throughout the video; Picture 2 reinforces the same people, product and wide composition.',
+        'integrated_multimodal_description: [Shot 1] 一镜到底，固定机位，完整双人对话口播。'
+        'A single uninterrupted wide master shot lasts for the entire 15 seconds. '
+        'The camera observes the complete two-person conversation from one fixed distant position. '
+        'Both people are visible head to toe, and the complete product silhouette remains inside the picture '
+        'with generous space below and on both sides at every moment. '
+        'The field of view and subject scale stay constant during every speaking turn and pause. '
+        'The uploaded reference is the sole product source. Preserve its exact structure, parts and proportions. '
+        'Preserve the reference background, lighting, clothing, people and product throughout. '
+        + motion + scene + ' Only the active speaker moves their lips. ' + ' '.join(voices),
+        '\n'.join(lines),
+        'overall_soundscape: The two voices alternate. No overlapping speech, narrator, additional utterances or music.',
+        'non_diegetic_music: N/A',
+    ))
+    if any(prompt.count(segment['dialogue']) != 1 for segment in segments):
+        raise ValueError('台词只能在对应语音标签中出现一次')
+    return prompt
+
+
+def validate_reference_wide_video_request(prompt, base_prompt, people, segments, motion_record=None):
+    try:
+        expected = compile_reference_wide_video_prompt(base_prompt, people, segments, motion_record)
+    except (ValueError, TypeError, KeyError):
+        return ['video.reference_wide_source_invalid']
+    return [] if prompt == expected else ['video.reference_wide_request_mismatch']
+
+
 def validate_video_request(prompt: str, segments: list[dict[str, object]], motion_record=None) -> list[str]:
     """Return stable video contract violations without changing the prompt."""
     text = prompt if isinstance(prompt, str) else ""

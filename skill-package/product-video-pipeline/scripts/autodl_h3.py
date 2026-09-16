@@ -128,12 +128,13 @@ def submit_payload(
     if workflow_id not in KNOWN_WORKFLOW_IDS:
         raise ValueError(f"不支持的工作流 ID：{workflow_id}")
     validate_first_last_payload(payload)
+    if workflow_id == 'minimax_h3_lightx2v' and payload['duration'] > 10:
+        raise ValueError('该首尾帧工作流公开上限为10秒，与当前15秒合同不兼容；不得自动切换或截短台词')
     submit_url = f"{COMFYUI_WORKFLOW_BASE}/{workflow_id}"
     api_payload = dict(payload)
     if workflow_id == "minimax_h3_lightx2v_v5_15s":
-        # AutoDL's current 15-second workflow exposes the two images as
-        # ref_image_0/ref_image_1, while the local workflow contract keeps
-        # their semantic roles as first_frame/last_frame.
+        # These are reference images, NOT API-enforced temporal endpoints.
+        # Local first/last names express prompt intent only (schema checked 2026-09-16).
         api_payload["ref_image_0"] = api_payload.pop("first_frame")
         api_payload["ref_image_1"] = api_payload.pop("last_frame")
         api_payload.setdefault("seed", int(_request_hash(payload)[:12], 16))
@@ -143,6 +144,17 @@ def submit_payload(
         "request_hash": _request_hash(api_payload),
         "payload": api_payload,
     }
+    evidence = {
+        'workflow_id': workflow_id,
+        'request_hash': preview['request_hash'],
+        'prompt_sha256': hashlib.sha256(str(api_payload['prompt']).encode('utf-8')).hexdigest(),
+        'image_fields': sorted(k for k in api_payload if k.startswith('ref_image_') or k in ('first_frame', 'last_frame')),
+        'image_binding': 'reference_images_prompt_only' if workflow_id == WORKFLOW_ID else 'first_last_frame_inputs',
+        'camera_lock_guaranteed': False,
+        'client_prompt_rewrite': False,
+        'server_prompt_rewrite': 'unknown',
+    }
+    preview['transport_evidence'] = evidence
     if dry_run:
         return preview
     if not confirm_paid:
@@ -150,6 +162,8 @@ def submit_payload(
     api_key = api_key or _config_value("AUTODL_API_KEY")
     if not api_key:
         raise ValueError("未设置 AUTODL_API_KEY")
+    if response_path is not None:
+        _write_json(response_path.with_name(response_path.stem + '.request-evidence.json'), evidence)
     response = _json_request("POST", submit_url, api_key, auth_scheme, api_payload, timeout)
     if response_path is not None:
         _write_json(response_path, response)

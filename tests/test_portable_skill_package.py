@@ -367,7 +367,7 @@ def test_skill_runtime_entry_is_compact_and_runner_driven():
 
 
 def test_current_source_is_v1_7_with_low_cost_runtime_files():
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.13"
     for relative in (
         "pipeline_policy.json",
         "scripts/pipeline_policy.py",
@@ -416,7 +416,7 @@ def test_low_cost_pipeline_end_to_end_dry_run(tmp_path, monkeypatch):
 
 
 def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.13.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -427,7 +427,7 @@ def test_v1_7_release_contains_low_cost_runner_and_no_secrets():
             "product-video-pipeline/scripts/pipeline_runner.py",
         }
         assert required <= names
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.13"
         assert not any(
             name.endswith(".env")
             or name.endswith(".pyc")
@@ -456,7 +456,7 @@ def test_clean_first_level_and_work_file_rules_are_documented():
     assert "_工作文件" in workflow and "_工作文件" in autodl
     assert "按发布标题清洗命名的 `.mp4`" in skill
     assert "真实存在的绝对路径" in workflow
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.13"
 
 
 def test_explicit_approval_rules_gate_every_root_output_by_hash():
@@ -470,11 +470,11 @@ def test_explicit_approval_rules_gate_every_root_output_by_hash():
     assert "WAITING_USER_FEEDBACK" in skill
     assert "V02" in review
     assert "产品参考图是唯一产品依据" in contract
-    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.12"
+    assert (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip() == "1.8.13"
 
 
 def test_v1_5_release_contains_unified_first_last_frame_skill():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.13.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -483,7 +483,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
         assert "product-video-pipeline/scripts/autodl_h3.py" in names
         assert "product-video-pipeline/references/autodl-h3.md" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.13"
         autodl = bundle.read("product-video-pipeline/references/autodl-h3.md").decode("utf-8")
         assert "first_frame" in autodl and "last_frame" in autodl
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
@@ -491,7 +491,7 @@ def test_v1_5_release_contains_unified_first_last_frame_skill():
 
 
 def test_v1_6_release_contains_seven_root_deliverables():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.13.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -499,7 +499,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
         assert "product-video-pipeline/VERSION" in names
         assert "product-video-pipeline/scripts/workflow_cli.py" in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.13"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         for artifact in (
             "标题.txt",
@@ -514,7 +514,7 @@ def test_v1_6_release_contains_seven_root_deliverables():
 
 
 def test_v1_6_1_release_contains_startup_communication_contract():
-    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.12.zip"
+    archive = REPO_ROOT / "release" / "product-video-pipeline-v1.8.13.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         names = set(bundle.namelist())
@@ -525,7 +525,7 @@ def test_v1_6_1_release_contains_startup_communication_contract():
             name.endswith(".env") or "__pycache__" in name or name.endswith(".pyc")
             for name in names
         )
-        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.12"
+        assert bundle.read("product-video-pipeline/VERSION").decode("utf-8").strip() == "1.8.13"
         skill = bundle.read("product-video-pipeline/SKILL.md").decode("utf-8")
         startup = bundle.read(
             "product-video-pipeline/references/startup-checklist.md"
@@ -1266,7 +1266,7 @@ def test_autodl_client_dry_run_is_non_billable_and_task_id_parser_is_tolerant(tm
     assert client._status({"data": {"status": "completed"}}) == "completed"
 
 
-def test_autodl_client_can_preview_first_last_frame_workflow(tmp_path):
+def test_autodl_client_rejects_15_seconds_on_legacy_ten_second_workflow(tmp_path):
     client = load_script("autodl_h3.py")
     payload_path = tmp_path / "first-last.json"
     payload_path.write_text(
@@ -1283,15 +1283,13 @@ def test_autodl_client_can_preview_first_last_frame_workflow(tmp_path):
         encoding="utf-8",
     )
 
-    preview = client.submit_payload(
-        payload_path,
-        api_key="secret",
-        dry_run=True,
-        workflow_id="minimax_h3_lightx2v",
-    )
-
-    assert preview["url"].endswith("/minimax_h3_lightx2v")
-    assert preview["payload"]["first_frame"] != preview["payload"]["last_frame"]
+    with pytest.raises(ValueError, match="10秒"):
+        client.submit_payload(
+            payload_path,
+            api_key="secret",
+            dry_run=True,
+            workflow_id="minimax_h3_lightx2v",
+        )
 
 
 def test_autodl_client_rejects_legacy_multi_image_audio_workflow(tmp_path):
